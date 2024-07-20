@@ -29,7 +29,7 @@ const Builder = struct {
             .name = "preprocess",
             .root_source_file = self.b.path("src/preprocess_data.zig"),
             .target = self.target,
-            .optimize = .ReleaseFast,
+            .optimize = self.opt,
         });
         exe.linkSystemLibrary("expat");
         exe.linkLibC();
