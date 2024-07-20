@@ -156,7 +156,7 @@ async function loadPointsData(mod) {
       16384,
     );
     chunk_buf.set(value);
-    mod.instance.exports.pushData(value.length);
+    mod.instance.exports.pushMapData(value.length);
   }
 }
 
