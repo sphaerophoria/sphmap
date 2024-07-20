@@ -1,6 +1,7 @@
 class WasmHandler {
   constructor(gl) {
     this.gl = gl;
+    this.ebos = [];
     this.vaos = [];
     this.programs = [];
     this.uniform_locs = [];
@@ -39,12 +40,6 @@ class WasmHandler {
     return this.programs.length - 1;
   }
 
-  bind2DFloat32DataWasm(d, len) {
-    const arr = new Float32Array(this.memory.buffer, d, len);
-    vaos.push(bind2DFloat32Data(arr));
-    return vaos.length - 1;
-  }
-
   bind2DFloat32Data(ptr, len) {
     const positions = new Float32Array(this.memory.buffer, ptr, len);
     const positionBuffer = this.gl.createBuffer();
@@ -52,6 +47,19 @@ class WasmHandler {
     this.gl.bufferData(this.gl.ARRAY_BUFFER, positions, this.gl.STATIC_DRAW);
     this.gl.vertexAttribPointer(0, 2, this.gl.FLOAT, false, 0, 0);
     this.gl.enableVertexAttribArray(0);
+  }
+
+  bindEbo(ptr, len) {
+    const indices = new Uint32Array(this.memory.buffer, ptr, len);
+    const ebo = this.gl.createBuffer();
+    this.gl.bindBuffer(this.gl.ELEMENT_ARRAY_BUFFER, ebo);
+    this.gl.bufferData(
+      this.gl.ELEMENT_ARRAY_BUFFER,
+      indices,
+      this.gl.STATIC_DRAW,
+    );
+    this.ebos.push(ebo);
+    return this.ebos.length - 1;
   }
 
   getUniformLocWasm(program, namep, name_len) {
@@ -110,11 +118,13 @@ async function instantiateWasmModule(wasm_handlers) {
       logWasm: wasm_handlers.logWasm.bind(wasm_handlers),
       compileLinkProgram: wasm_handlers.compileLinkProgram.bind(wasm_handlers),
       bind2DFloat32Data: wasm_handlers.bind2DFloat32Data.bind(wasm_handlers),
+      bindEbo: wasm_handlers.bindEbo.bind(wasm_handlers),
       glBindVertexArray: wasm_handlers.glBindVertexArray.bind(wasm_handlers),
       glClearColor: (...args) => wasm_handlers.gl.clearColor(...args),
       glClear: (...args) => wasm_handlers.gl.clear(...args),
       glUseProgram: wasm_handlers.glUseProgram.bind(wasm_handlers),
       glDrawArrays: (...args) => wasm_handlers.gl.drawArrays(...args),
+      glDrawElements: (...args) => wasm_handlers.gl.drawElements(...args),
       glGetUniformLoc: wasm_handlers.getUniformLocWasm.bind(wasm_handlers),
       glUniform1f: wasm_handlers.glUniform1f.bind(wasm_handlers),
     },
