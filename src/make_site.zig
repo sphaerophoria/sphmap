@@ -5,13 +5,19 @@ const XmlParser = @import("XmlParser.zig");
 const Allocator = std.mem.Allocator;
 
 const Userdata = struct {
+    alloc: Allocator,
     points_out: std.io.AnyWriter,
     metadata: Metadata = .{},
     node_id_idx_map: std.AutoHashMap(i64, usize),
+    way_tags: std.ArrayList([]Metadata.Tag),
+    in_way: bool = false,
+    this_way_tags: std.ArrayList(Metadata.Tag),
     num_nodes: u64 = 0,
 
     fn deinit(self: *Userdata) void {
         self.node_id_idx_map.deinit();
+        self.way_tags.deinit();
+        self.this_way_tags.deinit();
     }
 
     fn handleNode(user_data: *Userdata, attrs: *XmlParser.XmlAttrIter) void {
@@ -67,11 +73,40 @@ fn startElement(ctx: ?*anyopaque, name: []const u8, attrs: *XmlParser.XmlAttrIte
         return;
     } else if (std.mem.eql(u8, name, "way")) {
         user_data.points_out.writeInt(u32, 0xffffffff, .little) catch unreachable;
+        user_data.in_way = true;
     } else if (std.mem.eql(u8, name, "nd")) {
         const node_id_s = findAttributeVal("ref", attrs) orelse return;
         const node_id = std.fmt.parseInt(i64, node_id_s, 10) catch unreachable;
         const node_idx = user_data.node_id_idx_map.get(node_id) orelse return;
         user_data.points_out.writeInt(u32, @intCast(node_idx), .little) catch unreachable;
+    } else if (std.mem.eql(u8, name, "tag")) {
+        if (user_data.in_way) {
+            var k_opt: ?[]const u8 = null;
+            var v_opt: ?[]const u8 = null;
+            while (attrs.next()) |attr| {
+                if (std.mem.eql(u8, attr.key, "k")) {
+                    k_opt = attr.val;
+                } else if (std.mem.eql(u8, attr.key, "v")) {
+                    v_opt = attr.val;
+                }
+            }
+
+            const k = k_opt orelse return;
+            const v = v_opt orelse return;
+
+            user_data.this_way_tags.append(.{
+                .key = user_data.alloc.dupe(u8, k) catch return,
+                .val = user_data.alloc.dupe(u8, v) catch return,
+            }) catch unreachable;
+        }
+    }
+}
+
+fn endElement(ctx: ?*anyopaque, name: []const u8) void {
+    const user_data: *Userdata = @ptrCast(@alignCast(ctx));
+    if (std.mem.eql(u8, name, "way")) {
+        user_data.in_way = false;
+        user_data.way_tags.append(user_data.this_way_tags.toOwnedSlice() catch unreachable) catch unreachable;
     }
 }
 
@@ -196,17 +231,31 @@ pub fn main() !void {
     const points_out_writer = points_out_buf_writer.writer().any();
 
     var userdata = Userdata{
+        .alloc = alloc,
         .points_out = points_out_writer,
         .node_id_idx_map = std.AutoHashMap(i64, usize).init(alloc),
+        .way_tags = std.ArrayList([]Metadata.Tag).init(alloc),
+        .this_way_tags = std.ArrayList(Metadata.Tag).init(alloc),
     };
     defer userdata.deinit();
 
     try runParser(args.osm_data, .{
         .ctx = &userdata,
         .startElement = startElement,
+        .endElement = endElement,
     });
 
     const metadata_out_f = try std.fs.cwd().createFile(metadata_path, .{});
     userdata.metadata.end_nodes = userdata.num_nodes * 8;
+    userdata.metadata.way_tags = try userdata.way_tags.toOwnedSlice();
     try std.json.stringify(userdata.metadata, .{}, metadata_out_f.writer());
+
+    for (userdata.metadata.way_tags) |way_tags| {
+        for (way_tags) |tag| {
+            alloc.free(tag.key);
+            alloc.free(tag.val);
+        }
+        alloc.free(way_tags);
+    }
+    alloc.free(userdata.metadata.way_tags);
 }

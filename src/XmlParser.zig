@@ -32,6 +32,7 @@ pub const XmlAttrIter = struct {
 pub const Callbacks = struct {
     ctx: ?*anyopaque,
     startElement: *const fn (ctx: ?*anyopaque, name: []const u8, attrs: *XmlAttrIter) void,
+    endElement: *const fn (ctx: ?*anyopaque, name: []const u8) void,
 };
 
 const XmlParser = @This();
@@ -49,7 +50,7 @@ pub fn init(callbacks: *const Callbacks) Error!XmlParser {
     errdefer c.XML_ParserFree(parser);
 
     c.XML_SetUserData(parser, @constCast(callbacks));
-    c.XML_SetElementHandler(parser, startElement, null);
+    c.XML_SetElementHandler(parser, startElement, endElement);
 
     return .{
         .parser = parser.?,
@@ -83,4 +84,11 @@ fn startElement(ctx: ?*anyopaque, name_c: [*c]const c.XML_Char, attrs: [*c][*c]c
     };
 
     callbacks.startElement(callbacks.ctx, name, &it);
+}
+
+fn endElement(ctx: ?*anyopaque, name_c: [*c]const c.XML_Char) callconv(.C) void {
+    const callbacks: *const Callbacks = @ptrCast(@alignCast(ctx));
+    const name = std.mem.span(name_c);
+
+    callbacks.endElement(callbacks.ctx, name);
 }

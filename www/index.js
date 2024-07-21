@@ -1,10 +1,24 @@
+class ObjectRegistry {
+  constructor() {
+    this.objects = [];
+  }
+
+  push(obj) {
+    this.objects.push(obj);
+    return this.objects.length - 1;
+  }
+
+  get(id) {
+    return this.objects[id];
+  }
+}
+
 class WasmHandler {
-  constructor(gl) {
+  constructor(gl, tags_div) {
     this.gl = gl;
-    this.ebos = [];
-    this.vaos = [];
-    this.programs = [];
-    this.uniform_locs = [];
+    this.gl.lineWidth(20.0);
+    this.tags_div = tags_div;
+    this.gl_objects = new ObjectRegistry();
     this.memory = null;
   }
 
@@ -36,56 +50,78 @@ class WasmHandler {
       );
     }
 
-    this.programs.push(shaderProgram);
-    return this.programs.length - 1;
+    return this.gl_objects.push(shaderProgram);
   }
 
   bind2DFloat32Data(ptr, len) {
     const positions = new Float32Array(this.memory.buffer, ptr, len);
     const positionBuffer = this.gl.createBuffer();
+    const vao = this.gl.createVertexArray();
+    this.gl.bindVertexArray(vao);
     this.gl.bindBuffer(this.gl.ARRAY_BUFFER, positionBuffer);
     this.gl.bufferData(this.gl.ARRAY_BUFFER, positions, this.gl.STATIC_DRAW);
     this.gl.vertexAttribPointer(0, 2, this.gl.FLOAT, false, 0, 0);
     this.gl.enableVertexAttribArray(0);
+    return this.gl_objects.push(vao);
   }
 
-  bindEbo(ptr, len) {
-    const indices = new Uint32Array(this.memory.buffer, ptr, len);
-    const ebo = this.gl.createBuffer();
-    this.gl.bindBuffer(this.gl.ELEMENT_ARRAY_BUFFER, ebo);
-    this.gl.bufferData(
-      this.gl.ELEMENT_ARRAY_BUFFER,
-      indices,
-      this.gl.STATIC_DRAW,
-    );
-    this.ebos.push(ebo);
-    return this.ebos.length - 1;
+  glCreateVertexArray() {
+    return this.gl_objects.push(this.gl.createVertexArray());
+  }
+
+  glCreateBuffer() {
+    return this.gl_objects.push(this.gl.createBuffer());
+  }
+
+  glBindBuffer(target, buffer) {
+    this.gl.bindBuffer(target, this.gl_objects.get(buffer));
+  }
+
+  glBufferData(target, ptr, len, usage) {
+    const data = new Uint8Array(this.memory.buffer, ptr, len);
+    this.gl.bufferData(target, data, usage);
   }
 
   getUniformLocWasm(program, namep, name_len) {
     const name_data = new Uint8Array(this.memory.buffer, namep, name_len);
     const name = new TextDecoder("utf8").decode(name_data);
-    this.uniform_locs.push(
-      this.gl.getUniformLocation(this.programs[program], name),
+    return this.gl_objects.push(
+      this.gl.getUniformLocation(this.gl_objects.get(program), name),
     );
-    return this.uniform_locs.length - 1;
   }
 
   glBindVertexArray(vao) {
-    this.gl.bindVertexArray(this.vaos[vao]);
+    this.gl.bindVertexArray(this.gl_objects.get(vao));
   }
 
   glUseProgram(program) {
-    this.gl.useProgram(this.programs[program]);
+    this.gl.useProgram(this.gl_objects.get(program));
   }
 
   glUniform1f(loc, val) {
-    this.gl.uniform1f(this.uniform_locs[loc], val);
+    this.gl.uniform1f(this.gl_objects.get(loc), val);
   }
 
   logWasm(s, len) {
     const buf = new Uint8Array(this.memory.buffer, s, len);
     console.log(new TextDecoder("utf8").decode(buf));
+  }
+
+  clearTags() {
+    this.tags_div.innerHTML = "";
+  }
+
+  pushTag(k, k_len, v, v_len) {
+    const k_buf = new Uint8Array(this.memory.buffer, k, k_len);
+    const v_buf = new Uint8Array(this.memory.buffer, v, v_len);
+
+    const dec = new TextDecoder("utf8");
+    const ks = dec.decode(k_buf);
+    const vs = dec.decode(v_buf);
+
+    const div = document.createElement("div");
+    div.innerHTML = `${ks}: ${vs}`;
+    this.tags_div.append(div);
   }
 }
 
@@ -118,8 +154,18 @@ async function instantiateWasmModule(wasm_handlers) {
       logWasm: wasm_handlers.logWasm.bind(wasm_handlers),
       compileLinkProgram: wasm_handlers.compileLinkProgram.bind(wasm_handlers),
       bind2DFloat32Data: wasm_handlers.bind2DFloat32Data.bind(wasm_handlers),
-      bindEbo: wasm_handlers.bindEbo.bind(wasm_handlers),
       glBindVertexArray: wasm_handlers.glBindVertexArray.bind(wasm_handlers),
+      glCreateBuffer: wasm_handlers.glCreateBuffer.bind(wasm_handlers),
+      glBindBuffer: wasm_handlers.glBindBuffer.bind(wasm_handlers),
+      glBufferData: wasm_handlers.glBufferData.bind(wasm_handlers),
+      glCreateVertexArray:
+        wasm_handlers.glCreateVertexArray.bind(wasm_handlers),
+      glVertexAttribPointer: (...args) => {
+        console.log(...args);
+        wasm_handlers.gl.vertexAttribPointer(...args);
+      },
+      glEnableVertexAttribArray: (...args) =>
+        wasm_handlers.gl.enableVertexAttribArray(...args),
       glClearColor: (...args) => wasm_handlers.gl.clearColor(...args),
       glClear: (...args) => wasm_handlers.gl.clear(...args),
       glUseProgram: wasm_handlers.glUseProgram.bind(wasm_handlers),
@@ -127,6 +173,8 @@ async function instantiateWasmModule(wasm_handlers) {
       glDrawElements: (...args) => wasm_handlers.gl.drawElements(...args),
       glGetUniformLoc: wasm_handlers.getUniformLocWasm.bind(wasm_handlers),
       glUniform1f: wasm_handlers.glUniform1f.bind(wasm_handlers),
+      clearTags: wasm_handlers.clearTags.bind(wasm_handlers),
+      pushTag: wasm_handlers.pushTag.bind(wasm_handlers),
     },
   };
 
@@ -139,8 +187,8 @@ async function instantiateWasmModule(wasm_handlers) {
   return mod;
 }
 
-async function loadPointsData(mod) {
-  const map_data_response = await fetch("map_data.bin");
+async function loadDataFromServer(uri, mod, pushFn) {
+  const map_data_response = await fetch(uri);
   const data_reader = map_data_response.body.getReader({
     mode: "byob",
   });
@@ -156,23 +204,23 @@ async function loadPointsData(mod) {
       16384,
     );
     chunk_buf.set(value);
-    mod.instance.exports.pushMapData(value.length);
+    pushFn(value.length);
   }
+}
+async function loadPointsData(mod) {
+  await loadDataFromServer(
+    "map_data.bin",
+    mod,
+    mod.instance.exports.pushMapData,
+  );
 }
 
 async function loadMetadata(mod) {
-  const map_data_response = await fetch("map_data.json");
-  const data = await map_data_response.arrayBuffer();
-
-  const chunk_buf = new Uint8Array(
-    mod.instance.exports.memory.buffer,
-    mod.instance.exports.global_chunk.value,
-    data.byteLength,
+  await loadDataFromServer(
+    "map_data.json",
+    mod,
+    mod.instance.exports.pushMetadata,
   );
-
-  chunk_buf.set(new Uint8Array(data));
-
-  mod.instance.exports.setMetadata(data.byteLength);
 }
 
 function canvasAspect(canvas) {
@@ -243,13 +291,20 @@ function makeGl(canvas) {
 
 async function init() {
   const canvas = initCanvas();
-  const wasm_handlers = new WasmHandler(makeGl(canvas));
+  const tags_div = document.getElementById("tags");
+  const wasm_handlers = new WasmHandler(makeGl(canvas), tags_div);
   const mod = await instantiateWasmModule(wasm_handlers);
   await loadPointsData(mod);
   await loadMetadata(mod);
 
   mod.instance.exports.init(canvasAspect(canvas));
   mod.instance.exports.render();
+
+  const debug_checkbox = document.getElementById("debug");
+  debug_checkbox.onchange = (ev) => {
+    mod.instance.exports.setDebug(ev.target.checked);
+  };
+  mod.instance.exports.setDebug(debug_checkbox.checked);
 
   const canvas_callbacks = new CanvasInputHandler(canvas, mod);
   canvas_callbacks.setCanvasCallbacks();

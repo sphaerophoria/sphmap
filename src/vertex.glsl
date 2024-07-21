@@ -6,6 +6,7 @@ uniform float lat_center;
 uniform float lon_center;
 uniform float zoom;
 uniform float aspect;
+uniform float point_size;
 
 void main() {
   gl_Position = aVertexPosition;
@@ -14,5 +15,5 @@ void main() {
   gl_Position.y *= aspect * zoom;
   gl_Position.x -= lon_center; //123.50649;
   gl_Position.x *= zoom;
-  gl_PointSize = 0.5;
+  gl_PointSize = point_size;
 }

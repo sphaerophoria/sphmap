@@ -1,8 +1,9 @@
 #version 300 es
 
 precision highp float;
-out vec4 color;
+uniform float color;
+out vec4 out_color;
 
 void main() {
-  color = vec4(1.0, 1.0, 1.0, 1.0);
+  out_color = vec4(color, 1.0, 1.0, 1.0);
 }

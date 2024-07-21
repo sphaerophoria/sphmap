@@ -1,13 +1,30 @@
 const std = @import("std");
 const Metadata = @import("Metadata.zig");
 const App = @import("App.zig");
-const Allocator = std.mem.Allocator;
+
+pub const std_options = std.Options{
+    .logFn = wasmLog,
+    .log_level = .debug,
+};
 
 pub extern fn logWasm(s: [*]const u8, len: usize) void;
+fn wasmLog(
+    comptime message_level: std.log.Level,
+    comptime scope: @TypeOf(.enum_literal),
+    comptime format: []const u8,
+    args: anytype,
+) void {
+    _ = message_level;
+    _ = scope;
+    print(format, args);
+}
 
 fn print(comptime fmt: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;
-    const slice = std.fmt.bufPrint(&buf, fmt, args) catch unreachable;
+    const slice = std.fmt.bufPrint(&buf, fmt, args) catch {
+        logWasm(&buf, buf.len);
+        return;
+    };
     logWasm(slice.ptr, slice.len);
 }
 
@@ -17,15 +34,14 @@ pub export fn pushMapData(len: usize) void {
     global.map_data.appendSlice(global_chunk[0..len]) catch unreachable;
 }
 
-pub export fn setMetadata(len: usize) void {
-    const alloc = std.heap.wasm_allocator;
-    const parsed = std.json.parseFromSlice(Metadata, alloc, global_chunk[0..len], .{}) catch unreachable;
-    global.metadata = parsed.value;
+pub export fn pushMetadata(len: usize) void {
+    global.metadata_buf.appendSlice(global_chunk[0..len]) catch unreachable;
 }
 
 const GlobalState = struct {
     app: App = undefined,
     map_data: std.ArrayList(u8) = std.ArrayList(u8).init(std.heap.wasm_allocator),
+    metadata_buf: std.ArrayList(u8) = std.ArrayList(u8).init(std.heap.wasm_allocator),
     metadata: Metadata = .{},
 };
 
@@ -53,13 +69,20 @@ pub export fn zoom(delta_y: f32) void {
 }
 
 pub export fn setAspect(aspect: f32) void {
-    global.app.renderer.setAspect(aspect);
+    global.app.setAspect(aspect);
 }
 
 pub export fn init(aspect: f32) void {
-    global.app = App.init(aspect, global.map_data.items, global.metadata);
+    const parsed = std.json.parseFromSlice(Metadata, std.heap.wasm_allocator, global.metadata_buf.items, .{}) catch unreachable;
+    global.metadata = parsed.value;
+    global.app = App.init(std.heap.wasm_allocator, aspect, global.map_data.items, &global.metadata) catch unreachable;
 }
 
 pub export fn render() void {
-    global.app.renderer.render();
+    global.app.render();
+}
+
+pub export fn setDebug(val: bool) void {
+    global.app.debug = val;
+    global.app.render();
 }
