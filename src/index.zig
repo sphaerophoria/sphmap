@@ -75,6 +75,7 @@ pub export fn setAspect(aspect: f32) void {
 pub export fn init(aspect: f32) void {
     const parsed = std.json.parseFromSlice(Metadata, std.heap.wasm_allocator, global.metadata_buf.items, .{}) catch unreachable;
     global.metadata = parsed.value;
+
     global.app = App.init(std.heap.wasm_allocator, aspect, global.map_data.items, &global.metadata) catch unreachable;
 }
 

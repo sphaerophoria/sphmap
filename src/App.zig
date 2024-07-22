@@ -21,6 +21,10 @@ const WayId = struct {
 const WayLookup = struct {
     ways: []const Way,
 
+    fn deinit(self: *WayLookup, alloc: Allocator) void {
+        alloc.free(self.ways);
+    }
+
     fn get(self: *const WayLookup, id: WayId) Way {
         return self.ways[id.value];
     }
@@ -68,6 +72,7 @@ const ViewState = struct {
     aspect: f32,
 };
 
+alloc: Allocator,
 mouse_tracker: MouseTracker = .{},
 metadata: *const Metadata,
 renderer: Renderer,
@@ -93,13 +98,17 @@ pub fn init(alloc: Allocator, aspect_val: f32, map_data: []const u8, metadata: *
     const point_lookup = PointLookup{ .points = point_data };
 
     const index_buffer_objs = try parseIndexBuffer(alloc, point_lookup, metadata, index_data);
-    const way_lookup = index_buffer_objs[0];
-    const way_buckets = index_buffer_objs[1];
+    var way_lookup = index_buffer_objs[0];
+    errdefer way_lookup.deinit(alloc);
+
+    var way_buckets = index_buffer_objs[1];
+    errdefer way_buckets.deinit();
 
     var renderer = Renderer.init(point_data, index_data);
     renderer.bind().render(view_state);
 
     return .{
+        .alloc = alloc,
         .renderer = renderer,
         .metadata = metadata,
         .view_state = view_state,
@@ -107,6 +116,11 @@ pub fn init(alloc: Allocator, aspect_val: f32, map_data: []const u8, metadata: *
         .ways = way_lookup,
         .way_buckets = way_buckets,
     };
+}
+
+pub fn deinit(self: *App) void {
+    self.ways.deinit(self.alloc);
+    self.way_buckets.deinit();
 }
 
 pub fn onMouseDown(self: *App, x: f32, y: f32) void {
@@ -572,6 +586,13 @@ const WayBuckets = struct {
             .metadata = metadata,
             .buckets = buckets,
         };
+    }
+
+    fn deinit(self: *WayBuckets) void {
+        for (self.buckets) |*bucket| {
+            bucket.deinit(self.alloc);
+        }
+        self.alloc.free(self.buckets);
     }
 
     fn latLongToBucket(self: *WayBuckets, lat: f32, lon: f32) BucketId {

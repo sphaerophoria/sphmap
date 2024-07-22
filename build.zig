@@ -29,6 +29,15 @@ const Builder = struct {
         self.b.installArtifact(exe);
     }
 
+    fn makeGuiLib(self: *Builder) *std.Build.Step.Compile {
+        return self.b.addStaticLibrary(.{
+            .name = "gui",
+            .root_source_file = self.b.path("src/gui.zig"),
+            .target = self.target,
+            .optimize = self.opt,
+        });
+    }
+
     fn buildApp(self: *Builder) void {
         const wasm = self.b.addExecutable(.{
             .name = "index",
@@ -41,10 +50,23 @@ const Builder = struct {
 
         self.b.installArtifact(wasm);
     }
+
+    fn buildLocalApp(self: *Builder, libgui: *std.Build.Step.Compile) void {
+        const exe = self.b.addExecutable(.{
+            .name = "sphmap",
+            .root_source_file = self.b.path("src/local.zig"),
+            .target = self.target,
+            .optimize = self.opt,
+        });
+        exe.linkLibrary(libgui);
+        self.b.installArtifact(exe);
+    }
 };
 
 pub fn build(b: *std.Build) void {
     var builder = Builder.init(b);
+    const gui_lib = builder.makeGuiLib();
     builder.generateMapData();
     builder.buildApp();
+    builder.buildLocalApp(gui_lib);
 }
