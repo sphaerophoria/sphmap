@@ -229,7 +229,8 @@ function canvasAspect(canvas) {
 }
 
 class CanvasInputHandler {
-  constructor(canvas, mod) {
+  constructor(gl, canvas, mod) {
+    this.gl = gl;
     this.canvas = canvas;
     this.mod = mod;
   }
@@ -267,6 +268,9 @@ class CanvasInputHandler {
   }
 
   onResize() {
+    this.canvas.width = canvas.clientWidth;
+    this.canvas.height = canvas.clientHeight;
+    this.gl.viewport(0, 0, canvas.width, canvas.height);
     this.mod.instance.exports.setAspect(canvasAspect(this.canvas));
   }
 
@@ -292,7 +296,8 @@ function makeGl(canvas) {
 async function init() {
   const canvas = initCanvas();
   const tags_div = document.getElementById("tags");
-  const wasm_handlers = new WasmHandler(makeGl(canvas), tags_div);
+  const gl = makeGl(canvas);
+  const wasm_handlers = new WasmHandler(gl, tags_div);
   const mod = await instantiateWasmModule(wasm_handlers);
   await loadPointsData(mod);
   await loadMetadata(mod);
@@ -306,7 +311,7 @@ async function init() {
   };
   mod.instance.exports.setDebug(debug_checkbox.checked);
 
-  const canvas_callbacks = new CanvasInputHandler(canvas, mod);
+  const canvas_callbacks = new CanvasInputHandler(gl, canvas, mod);
   canvas_callbacks.setCanvasCallbacks();
   mod.instance.exports.render();
 }
