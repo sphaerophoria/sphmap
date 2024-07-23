@@ -16,7 +16,6 @@ class ObjectRegistry {
 class WasmHandler {
   constructor(gl, tags_div) {
     this.gl = gl;
-    this.gl.lineWidth(20.0);
     this.tags_div = tags_div;
     this.gl_objects = new ObjectRegistry();
     this.memory = null;
