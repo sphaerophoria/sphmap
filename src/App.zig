@@ -33,6 +33,46 @@ const IndexRange = struct {
     end: usize,
 };
 
+const NodeAdjacencyMap = struct {
+    // Where in storage this node's neighbors are. Indexed by NodeId
+    segment_starts: []usize,
+    // All neighbors for all nodes, Each node's neighbors are contiguous
+    storage: []const NodeId,
+
+    fn init(alloc: Allocator, node_neighbors: []std.AutoArrayHashMapUnmanaged(NodeId, void)) !NodeAdjacencyMap {
+        var storage = std.ArrayList(NodeId).init(alloc);
+        defer storage.deinit();
+
+        var segment_starts = std.ArrayList(usize).init(alloc);
+        defer segment_starts.deinit();
+
+        for (node_neighbors) |neighbors| {
+            try segment_starts.append(storage.items.len);
+            try storage.appendSlice(neighbors.keys());
+        }
+
+        return .{
+            .storage = try storage.toOwnedSlice(),
+            .segment_starts = try segment_starts.toOwnedSlice(),
+        };
+    }
+
+    fn deinit(self: *NodeAdjacencyMap, alloc: Allocator) void {
+        alloc.free(self.storage);
+        alloc.free(self.segment_starts);
+    }
+
+    fn getNeighbors(self: *NodeAdjacencyMap, node: NodeId) []const NodeId {
+        const start = self.segment_starts[node.value];
+        const end = if (node.value + 1 == self.segment_starts.len)
+            self.storage.len
+        else
+            self.segment_starts[node.value + 1];
+
+        return self.storage[start..end];
+    }
+};
+
 const Way = struct {
     node_ids: []const NodeId,
 
@@ -56,6 +96,11 @@ const Way = struct {
 
 const PointLookup = struct {
     points: []const f32,
+
+    fn numPoints(self: *const PointLookup) usize {
+        return self.points.len / 2;
+    }
+
     fn get(self: *const PointLookup, id: NodeId) MapPos {
         return .{
             .x = self.points[id.value * 2],
@@ -77,8 +122,10 @@ renderer: Renderer,
 view_state: ViewState,
 points: PointLookup,
 ways: WayLookup,
+adjacency_map: NodeAdjacencyMap,
 way_buckets: WayBuckets,
-debug: bool = false,
+debug_way_finding: bool = false,
+debug_point_neighbors: bool = false,
 
 pub fn init(alloc: Allocator, aspect_val: f32, map_data: []u8, metadata: *const Metadata) !App {
     const point_data: []f32 = @alignCast(std.mem.bytesAsSlice(f32, map_data[0..@intCast(metadata.end_nodes)]));
@@ -120,11 +167,15 @@ pub fn init(alloc: Allocator, aspect_val: f32, map_data: []u8, metadata: *const 
     var way_buckets = index_buffer_objs[1];
     errdefer way_buckets.deinit();
 
+    var adjacency_map = index_buffer_objs[2];
+    errdefer adjacency_map.deinit(alloc);
+
     var renderer = Renderer.init(point_data, index_data);
     renderer.bind().render(view_state);
 
     return .{
         .alloc = alloc,
+        .adjacency_map = adjacency_map,
         .renderer = renderer,
         .metadata = metadata,
         .view_state = view_state,
@@ -135,6 +186,7 @@ pub fn init(alloc: Allocator, aspect_val: f32, map_data: []u8, metadata: *const 
 }
 
 pub fn deinit(self: *App) void {
+    self.adjacency_map.deinit(self.alloc);
     self.ways.deinit(self.alloc);
     self.way_buckets.deinit();
 }
@@ -181,7 +233,7 @@ pub fn onMouseMove(self: *App, x: f32, y: f32) void {
         self.points,
     );
 
-    if (self.debug) {
+    if (self.debug_way_finding) {
         bound_renderer.inner.color.set(0.0);
         while (calc.step()) |debug| {
             bound_renderer.inner.point_size.set(std.math.pow(f32, std.math.e, -debug.dist * 0.05) * 50.0);
@@ -207,8 +259,12 @@ pub fn onMouseMove(self: *App, x: f32, y: f32) void {
         }
         const node_id = way.node_ids[calc.min_way_segment];
 
+        const neighbors = self.adjacency_map.getNeighbors(node_id);
+        if (self.debug_point_neighbors) {
+            bound_renderer.renderPoints(neighbors, 10.0);
+        }
         bound_renderer.renderSelectedWay(self.ways.get(calc.min_way));
-        if (self.debug) {
+        if (self.debug_way_finding) {
             bound_renderer.renderCoords(&.{ self.view_state.center.x, self.view_state.center.y, calc.min_dist_loc.x, calc.min_dist_loc.y }, Gl.LINE_STRIP);
         }
         bound_renderer.inner.color.set(1.0);
@@ -241,25 +297,44 @@ fn parseIndexBuffer(
     width: f32,
     height: f32,
     index_buffer: []const u32,
-) !struct { WayLookup, WayBuckets } {
+) !struct { WayLookup, WayBuckets, NodeAdjacencyMap } {
     var ways = std.ArrayList(Way).init(alloc);
     defer ways.deinit();
 
     var way_buckets = try WayBuckets.init(alloc, width, height);
     var it = IndexBufferIt.init(index_buffer);
     var way_id: WayId = .{ .value = 0 };
+
+    var node_neighbors = try alloc.alloc(std.AutoArrayHashMapUnmanaged(NodeId, void), point_lookup.numPoints());
+    @memset(node_neighbors, std.AutoArrayHashMapUnmanaged(NodeId, void){});
+    defer {
+        for (node_neighbors) |*item| {
+            item.deinit(alloc);
+        }
+        alloc.free(node_neighbors);
+    }
+
     while (it.next()) |idx_buf_range| {
         defer way_id.value += 1;
         const way = Way.fromIndexRange(idx_buf_range, index_buffer);
         try ways.append(way);
-        for (way.node_ids) |node_id| {
+        for (way.node_ids, 0..) |node_id, i| {
+            if (i > 0) {
+                try node_neighbors[node_id.value].put(alloc, way.node_ids[i - 1], {});
+            }
+
+            if (i < way.node_ids.len - 1) {
+                try node_neighbors[node_id.value].put(alloc, way.node_ids[i + 1], {});
+            }
+
             const gps_pos = point_lookup.get(node_id);
             try way_buckets.push(way_id, gps_pos.y, gps_pos.x);
         }
     }
 
+    const node_adjacency_map = try NodeAdjacencyMap.init(alloc, node_neighbors);
     const way_lookup = WayLookup{ .ways = try ways.toOwnedSlice() };
-    return .{ way_lookup, way_buckets };
+    return .{ way_lookup, way_buckets, node_adjacency_map };
 }
 
 const NormalizedPosition = Point;

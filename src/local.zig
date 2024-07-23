@@ -41,6 +41,7 @@ pub fn main() !void {
 
     app.setAspect(0.5);
 
-    app.debug = true;
+    app.debug_way_finding = true;
+    app.debug_point_neighbors = true;
     app.render();
 }

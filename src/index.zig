@@ -83,7 +83,12 @@ pub export fn render() void {
     global.app.render();
 }
 
-pub export fn setDebug(val: bool) void {
-    global.app.debug = val;
+pub export fn setDebugWayFinding(val: bool) void {
+    global.app.debug_way_finding = val;
+    global.app.render();
+}
+
+pub export fn setDebugPointNeighbors(val: bool) void {
+    global.app.debug_point_neighbors = val;
     global.app.render();
 }

@@ -304,11 +304,19 @@ async function init() {
   mod.instance.exports.init(canvasAspect(canvas));
   mod.instance.exports.render();
 
-  const debug_checkbox = document.getElementById("debug");
-  debug_checkbox.onchange = (ev) => {
-    mod.instance.exports.setDebug(ev.target.checked);
+  const debug_way_finding = document.getElementById("debug_way_finding");
+  debug_way_finding.onchange = (ev) => {
+    mod.instance.exports.setDebugWayFinding(ev.target.checked);
   };
-  mod.instance.exports.setDebug(debug_checkbox.checked);
+  mod.instance.exports.setDebugWayFinding(debug_way_finding.checked);
+
+  const debug_point_neighbors = document.getElementById(
+    "debug_point_neighbors",
+  );
+  debug_point_neighbors.onchange = (ev) => {
+    mod.instance.exports.setDebugPointNeighbors(ev.target.checked);
+  };
+  mod.instance.exports.setDebugPointNeighbors(debug_point_neighbors.checked);
 
   const canvas_callbacks = new CanvasInputHandler(gl, canvas, mod);
   canvas_callbacks.setCanvasCallbacks();
