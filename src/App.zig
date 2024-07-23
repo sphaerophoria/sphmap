@@ -2,13 +2,11 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Metadata = @import("Metadata.zig");
 const lin = @import("lin.zig");
+const Point = lin.Point;
+const Vec = lin.Vec;
+const MapPos = lin.Point;
 
 const App = @This();
-
-const GpsCoord = struct {
-    lat: f32,
-    lon: f32,
-};
 
 const NodeId = struct {
     value: u32,
@@ -58,16 +56,16 @@ const Way = struct {
 
 const PointLookup = struct {
     points: []const f32,
-    fn get(self: *const PointLookup, id: NodeId) GpsCoord {
+    fn get(self: *const PointLookup, id: NodeId) MapPos {
         return .{
-            .lat = self.points[id.value * 2 + 1],
-            .lon = self.points[id.value * 2],
+            .x = self.points[id.value * 2],
+            .y = self.points[id.value * 2 + 1],
         };
     }
 };
 
 const ViewState = struct {
-    center: GpsCoord,
+    center: MapPos,
     zoom: f32,
     aspect: f32,
 };
@@ -82,22 +80,40 @@ ways: WayLookup,
 way_buckets: WayBuckets,
 debug: bool = false,
 
-pub fn init(alloc: Allocator, aspect_val: f32, map_data: []const u8, metadata: *const Metadata) !App {
-    const point_data: []const f32 = @alignCast(std.mem.bytesAsSlice(f32, map_data[0..@intCast(metadata.end_nodes)]));
+pub fn init(alloc: Allocator, aspect_val: f32, map_data: []u8, metadata: *const Metadata) !App {
+    const point_data: []f32 = @alignCast(std.mem.bytesAsSlice(f32, map_data[0..@intCast(metadata.end_nodes)]));
+
+    const center_lat = (metadata.min_lat + metadata.max_lat) / 2.0;
+    const center_lon = (metadata.min_lon + metadata.max_lon) / 2.0;
+
+    const lat_step = 111132.92 - 559.82 * @cos(2 * center_lat) + 1.175 * @cos(4 * center_lat) - 0.0023 * @cos(6 * center_lat);
+    const lon_step = 111412.84 * @cos(center_lon) - 93.5 * @cos(3 * center_lon) + 0.118 * @cos(5 * center_lon);
+
+    const height = lat_step * (metadata.max_lat - metadata.min_lat);
+    const width = lon_step * (metadata.max_lon - metadata.min_lon);
+
+    for (0..point_data.len / 2) |i| {
+        const lon = &point_data[i * 2];
+        const lat = &point_data[i * 2 + 1];
+
+        lat.* = lat_step * (metadata.max_lat - lat.*);
+        lon.* = lon_step * (lon.* - metadata.min_lon);
+    }
+
     const index_data: []const u32 = @alignCast(std.mem.bytesAsSlice(u32, map_data[@intCast(metadata.end_nodes)..]));
 
     const view_state = ViewState{
         .center = .{
-            .lat = (metadata.max_lat + metadata.min_lat) / 2.0,
-            .lon = (metadata.max_lon + metadata.min_lon) / 2.0,
+            .x = width / 2.0,
+            .y = height / 2.0,
         },
-        .zoom = 2.0 / (metadata.max_lon - metadata.min_lon),
+        .zoom = 2.0 / width,
         .aspect = aspect_val,
     };
 
     const point_lookup = PointLookup{ .points = point_data };
 
-    const index_buffer_objs = try parseIndexBuffer(alloc, point_lookup, metadata, index_data);
+    const index_buffer_objs = try parseIndexBuffer(alloc, point_lookup, width, height, index_data);
     var way_lookup = index_buffer_objs[0];
     errdefer way_lookup.deinit(alloc);
 
@@ -133,28 +149,26 @@ pub fn onMouseUp(self: *App) void {
 
 pub fn onMouseMove(self: *App, x: f32, y: f32) void {
     if (self.mouse_tracker.down) {
-        const movement = self.mouse_tracker.getMovement(x, y);
+        const movement = self.mouse_tracker.getMovement(x, y).mul(2.0 / self.view_state.zoom);
+        const new_pos = self.view_state.center.add(movement);
 
-        const new_lon = self.view_state.center.lon - movement.x / self.view_state.zoom * 2;
-        const new_lat = self.view_state.center.lat + movement.y / self.view_state.zoom * 2;
         // floating point imprecision may result in no actual movement of the
         // screen center. We should _not_ recenter in this case as it results
         // in slow mouse movements never moving the screen
-        if (new_lat != self.view_state.center.lat) {
+        if (new_pos.y != self.view_state.center.y) {
             self.mouse_tracker.pos.y = y;
         }
 
-        if (new_lon != self.view_state.center.lon) {
+        if (new_pos.x != self.view_state.center.x) {
             self.mouse_tracker.pos.x = x;
         }
 
-        self.view_state.center.lon = new_lon;
-        self.view_state.center.lat = new_lat;
+        self.view_state.center = new_pos;
     }
 
     const potential_ways = self.way_buckets.get(
-        self.view_state.center.lat,
-        self.view_state.center.lon,
+        self.view_state.center.y,
+        self.view_state.center.x,
     );
 
     const bound_renderer = self.renderer.bind();
@@ -170,8 +184,8 @@ pub fn onMouseMove(self: *App, x: f32, y: f32) void {
     if (self.debug) {
         bound_renderer.inner.color.set(0.0);
         while (calc.step()) |debug| {
-            bound_renderer.inner.point_size.set(std.math.pow(f32, std.math.e, -debug.dist * 5000.0) * 50.0);
-            bound_renderer.renderCoords(&.{ debug.dist_loc.lon, debug.dist_loc.lat }, Gl.POINTS);
+            bound_renderer.inner.point_size.set(std.math.pow(f32, std.math.e, -debug.dist * 0.05) * 50.0);
+            bound_renderer.renderCoords(&.{ debug.dist_loc.x, debug.dist_loc.y }, Gl.POINTS);
         }
     } else {
         while (calc.step()) |_| {}
@@ -187,7 +201,7 @@ pub fn onMouseMove(self: *App, x: f32, y: f32) void {
     if (calc.min_way.value < self.ways.ways.len) {
         bound_renderer.renderSelectedWay(self.ways.get(calc.min_way));
         if (self.debug) {
-            bound_renderer.renderCoords(&.{ self.view_state.center.lon, self.view_state.center.lat, calc.min_dist_loc.lon, calc.min_dist_loc.lat }, Gl.LINE_STRIP);
+            bound_renderer.renderCoords(&.{ self.view_state.center.x, self.view_state.center.y, calc.min_dist_loc.x, calc.min_dist_loc.y }, Gl.LINE_STRIP);
         }
     }
 }
@@ -214,13 +228,14 @@ pub fn render(self: *App) void {
 fn parseIndexBuffer(
     alloc: Allocator,
     point_lookup: PointLookup,
-    metadata: *const Metadata,
+    width: f32,
+    height: f32,
     index_buffer: []const u32,
 ) !struct { WayLookup, WayBuckets } {
     var ways = std.ArrayList(Way).init(alloc);
     defer ways.deinit();
 
-    var way_buckets = try WayBuckets.init(alloc, metadata);
+    var way_buckets = try WayBuckets.init(alloc, width, height);
     var it = IndexBufferIt.init(index_buffer);
     var way_id: WayId = .{ .value = 0 };
     while (it.next()) |idx_buf_range| {
@@ -229,7 +244,7 @@ fn parseIndexBuffer(
         try ways.append(way);
         for (way.node_ids) |node_id| {
             const gps_pos = point_lookup.get(node_id);
-            try way_buckets.push(way_id, gps_pos.lat, gps_pos.lon);
+            try way_buckets.push(way_id, gps_pos.y, gps_pos.x);
         }
     }
 
@@ -237,15 +252,8 @@ fn parseIndexBuffer(
     return .{ way_lookup, way_buckets };
 }
 
-const NormalizedPosition = struct {
-    x: f32,
-    y: f32,
-};
-
-const NormalizedOffset = struct {
-    x: f32,
-    y: f32,
-};
+const NormalizedPosition = Point;
+const NormalizedOffset = Vec;
 
 const MouseTracker = struct {
     down: bool = false,
@@ -263,7 +271,7 @@ const MouseTracker = struct {
 
     pub fn getMovement(self: *MouseTracker, x: f32, y: f32) NormalizedOffset {
         return .{
-            .x = x - self.pos.x,
+            .x = self.pos.x - x,
             .y = y - self.pos.y,
         };
     }
@@ -355,15 +363,15 @@ const BoundRenderer = struct {
         js.glClearColor(0.0, 0.0, 0.0, 1.0);
         js.glClear(Gl.COLOR_BUFFER_BIT);
 
-        self.inner.lat_center.set(view_state.center.lat);
-        self.inner.lon_center.set(view_state.center.lon);
+        self.inner.lat_center.set(view_state.center.y);
+        self.inner.lon_center.set(view_state.center.x);
         self.inner.aspect.set(view_state.aspect);
         self.inner.zoom.set(view_state.zoom);
         self.inner.color.set(1.0);
         js.glDrawElements(Gl.LINE_STRIP, @intCast(self.inner.num_line_segments), Gl.UNSIGNED_INT, 0);
 
         self.inner.point_size.set(10.0);
-        self.renderCoords(&.{ view_state.center.lon, view_state.center.lat }, Gl.POINTS);
+        self.renderCoords(&.{ view_state.center.x, view_state.center.y }, Gl.POINTS);
     }
 
     pub fn renderPoints(self: *const BoundRenderer, point_ids: []const NodeId, size: f32) void {
@@ -484,7 +492,7 @@ const ClosestWayCalculator = struct {
     points: PointLookup,
     ways: WayLookup,
     potential_ways: []const WayId,
-    pos: GpsCoord,
+    pos: MapPos,
 
     // Iteration data
     way_idx: usize,
@@ -492,15 +500,15 @@ const ClosestWayCalculator = struct {
 
     // Tracking data/output
     min_dist: f32,
-    min_dist_loc: GpsCoord,
+    min_dist_loc: MapPos,
     min_way: WayId,
 
     const DebugInfo = struct {
         dist: f32,
-        dist_loc: GpsCoord,
+        dist_loc: MapPos,
     };
 
-    fn init(p: GpsCoord, ways: WayLookup, potential_ways: []const WayId, points: PointLookup) ClosestWayCalculator {
+    fn init(p: MapPos, ways: WayLookup, potential_ways: []const WayId, points: PointLookup) ClosestWayCalculator {
         return ClosestWayCalculator{
             .ways = ways,
             .potential_ways = potential_ways,
@@ -534,22 +542,15 @@ const ClosestWayCalculator = struct {
             const a_point_id = way_points[self.segment_idx];
             const b_point_id = way_points[self.segment_idx + 1];
 
-            const a_gps = self.points.get(a_point_id);
-            const b_gps = self.points.get(b_point_id);
+            const a = self.points.get(a_point_id);
+            const b = self.points.get(b_point_id);
 
-            const a = lin.Point{ .x = a_gps.lon, .y = a_gps.lat };
-            const b = lin.Point{ .x = b_gps.lon, .y = b_gps.lat };
-            const p = lin.Point{ .x = self.pos.lon, .y = self.pos.lat };
-
-            const dist_loc = lin.closestPointOnLine(p, a, b);
-            const dist = p.sub(dist_loc).length();
+            const dist_loc = lin.closestPointOnLine(self.pos, a, b);
+            const dist = self.pos.sub(dist_loc).length();
 
             const ret = DebugInfo{
                 .dist = dist,
-                .dist_loc = .{
-                    .lon = dist_loc.x,
-                    .lat = dist_loc.y,
-                },
+                .dist_loc = dist_loc,
             };
 
             if (dist < self.min_dist) {
@@ -573,9 +574,10 @@ const WayBuckets = struct {
     const WayIdSet = std.AutoArrayHashMapUnmanaged(WayId, void);
     alloc: Allocator,
     buckets: []WayIdSet,
-    metadata: *const Metadata,
+    width: f32,
+    height: f32,
 
-    fn init(alloc: Allocator, metadata: *const Metadata) !WayBuckets {
+    fn init(alloc: Allocator, width: f32, height: f32) !WayBuckets {
         const buckets = try alloc.alloc(WayIdSet, x_buckets * y_buckets);
         for (buckets) |*bucket| {
             bucket.* = .{};
@@ -583,8 +585,9 @@ const WayBuckets = struct {
 
         return .{
             .alloc = alloc,
-            .metadata = metadata,
             .buckets = buckets,
+            .width = width,
+            .height = height,
         };
     }
 
@@ -596,12 +599,8 @@ const WayBuckets = struct {
     }
 
     fn latLongToBucket(self: *WayBuckets, lat: f32, lon: f32) BucketId {
-        const lat_dist = self.metadata.max_lat - self.metadata.min_lat;
-        const lon_dist = self.metadata.max_lon - self.metadata.min_lon;
-        const lat_offs = lat - self.metadata.min_lat;
-        const lon_offs = lon - self.metadata.min_lon;
-        const row_f = lat_offs / lat_dist * y_buckets;
-        const col_f = lon_offs / lon_dist * x_buckets;
+        const row_f = lat / self.height * y_buckets;
+        const col_f = lon / self.width * x_buckets;
         var row: usize = @intFromFloat(row_f);
         var col: usize = @intFromFloat(col_f);
 

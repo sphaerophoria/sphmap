@@ -3,7 +3,7 @@ const App = @import("App.zig");
 const Metadata = @import("Metadata.zig");
 const Allocator = std.mem.Allocator;
 
-fn readFileData(alloc: Allocator, p: []const u8) ![]const u8 {
+fn readFileData(alloc: Allocator, p: []const u8) ![]u8 {
     const cwd = std.fs.cwd();
     var f = try cwd.openFile(p, .{});
     defer f.close();
