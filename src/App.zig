@@ -199,10 +199,20 @@ pub fn onMouseMove(self: *App, x: f32, y: f32) void {
     }
 
     if (calc.min_way.value < self.ways.ways.len) {
+        bound_renderer.inner.color.set(0.0);
+        const way = self.ways.get(calc.min_way);
+        if (calc.min_way_segment > way.node_ids.len) {
+            std.log.err("invalid segment", .{});
+            unreachable;
+        }
+        const node_id = way.node_ids[calc.min_way_segment];
+
         bound_renderer.renderSelectedWay(self.ways.get(calc.min_way));
         if (self.debug) {
             bound_renderer.renderCoords(&.{ self.view_state.center.x, self.view_state.center.y, calc.min_dist_loc.x, calc.min_dist_loc.y }, Gl.LINE_STRIP);
         }
+        bound_renderer.inner.color.set(1.0);
+        bound_renderer.renderPoints(&.{node_id}, 10.0);
     }
 }
 
@@ -377,7 +387,6 @@ const BoundRenderer = struct {
     pub fn renderPoints(self: *const BoundRenderer, point_ids: []const NodeId, size: f32) void {
         js.glBindVertexArray(self.inner.vao);
 
-        self.inner.color.set(0.0);
         self.inner.point_size.set(size);
 
         for (point_ids) |point| {
@@ -502,6 +511,7 @@ const ClosestWayCalculator = struct {
     min_dist: f32,
     min_dist_loc: MapPos,
     min_way: WayId,
+    min_way_segment: usize,
 
     const DebugInfo = struct {
         dist: f32,
@@ -518,6 +528,7 @@ const ClosestWayCalculator = struct {
             .min_dist = std.math.floatMax(f32),
             .min_dist_loc = undefined,
             .min_way = undefined,
+            .min_way_segment = undefined,
             .pos = p,
         };
     }
@@ -557,6 +568,13 @@ const ClosestWayCalculator = struct {
                 self.min_dist = dist;
                 self.min_way = self.potential_ways[self.way_idx];
                 self.min_dist_loc = ret.dist_loc;
+                const ab_len = b.sub(a).length();
+                const ap_len = self.pos.sub(a).length();
+                if (ap_len / ab_len > 0.5) {
+                    self.min_way_segment = self.segment_idx + 1;
+                } else {
+                    self.min_way_segment = self.segment_idx;
+                }
             }
 
             return ret;
