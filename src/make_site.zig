@@ -11,12 +11,19 @@ const Userdata = struct {
     node_id_idx_map: std.AutoHashMap(i64, usize),
     way_tags: std.ArrayList([]Metadata.Tag),
     in_way: bool = false,
+    found_highway: bool = false,
     this_way_tags: std.ArrayList(Metadata.Tag),
+    this_way_nodes: std.ArrayList(u32),
     num_nodes: u64 = 0,
 
     fn deinit(self: *Userdata) void {
         self.node_id_idx_map.deinit();
         self.way_tags.deinit();
+        self.this_way_nodes.deinit();
+        for (self.this_way_tags.items) |tag| {
+            self.alloc.free(tag.key);
+            self.alloc.free(tag.val);
+        }
         self.this_way_tags.deinit();
     }
 
@@ -72,13 +79,19 @@ fn startElement(ctx: ?*anyopaque, name: []const u8, attrs: *XmlParser.XmlAttrIte
         user_data.handleNode(attrs);
         return;
     } else if (std.mem.eql(u8, name, "way")) {
-        user_data.points_out.writeInt(u32, 0xffffffff, .little) catch unreachable;
         user_data.in_way = true;
+        user_data.found_highway = false;
+        user_data.this_way_nodes.clearRetainingCapacity();
+        for (user_data.this_way_tags.items) |tag| {
+            user_data.alloc.free(tag.key);
+            user_data.alloc.free(tag.val);
+        }
+        user_data.this_way_tags.clearRetainingCapacity();
     } else if (std.mem.eql(u8, name, "nd")) {
         const node_id_s = findAttributeVal("ref", attrs) orelse return;
         const node_id = std.fmt.parseInt(i64, node_id_s, 10) catch unreachable;
         const node_idx = user_data.node_id_idx_map.get(node_id) orelse return;
-        user_data.points_out.writeInt(u32, @intCast(node_idx), .little) catch unreachable;
+        user_data.this_way_nodes.append(@intCast(node_idx)) catch unreachable;
     } else if (std.mem.eql(u8, name, "tag")) {
         if (user_data.in_way) {
             var k_opt: ?[]const u8 = null;
@@ -94,6 +107,10 @@ fn startElement(ctx: ?*anyopaque, name: []const u8, attrs: *XmlParser.XmlAttrIte
             const k = k_opt orelse return;
             const v = v_opt orelse return;
 
+            if (std.mem.eql(u8, k, "highway")) {
+                user_data.found_highway = true;
+            }
+
             user_data.this_way_tags.append(.{
                 .key = user_data.alloc.dupe(u8, k) catch return,
                 .val = user_data.alloc.dupe(u8, v) catch return,
@@ -106,7 +123,14 @@ fn endElement(ctx: ?*anyopaque, name: []const u8) void {
     const user_data: *Userdata = @ptrCast(@alignCast(ctx));
     if (std.mem.eql(u8, name, "way")) {
         user_data.in_way = false;
-        user_data.way_tags.append(user_data.this_way_tags.toOwnedSlice() catch unreachable) catch unreachable;
+        if (user_data.found_highway) {
+            user_data.points_out.writeInt(u32, 0xffffffff, .little) catch unreachable;
+            for (user_data.this_way_nodes.items) |node_idx| {
+                user_data.points_out.writeInt(u32, node_idx, .little) catch unreachable;
+            }
+            user_data.way_tags.append(user_data.this_way_tags.toOwnedSlice() catch unreachable) catch unreachable;
+            user_data.this_way_tags.clearRetainingCapacity();
+        }
     }
 }
 
@@ -236,6 +260,7 @@ pub fn main() !void {
         .node_id_idx_map = std.AutoHashMap(i64, usize).init(alloc),
         .way_tags = std.ArrayList([]Metadata.Tag).init(alloc),
         .this_way_tags = std.ArrayList(Metadata.Tag).init(alloc),
+        .this_way_nodes = std.ArrayList(u32).init(alloc),
     };
     defer userdata.deinit();
 
