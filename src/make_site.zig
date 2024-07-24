@@ -4,32 +4,97 @@ const Metadata = @import("Metadata.zig");
 const XmlParser = @import("XmlParser.zig");
 const Allocator = std.mem.Allocator;
 
-const Userdata = struct {
-    alloc: Allocator,
-    points_out: std.io.AnyWriter,
-    metadata: Metadata = .{},
-    node_id_idx_map: std.AutoHashMap(i64, usize),
-    way_tags: std.ArrayList([]Metadata.Tag),
-    in_way: bool = false,
-    found_highway: bool = false,
-    this_way_tags: std.ArrayList(Metadata.Tag),
-    this_way_nodes: std.ArrayList(u32),
-    num_nodes: u64 = 0,
+const NodeIdIdxMap = std.AutoHashMap(i64, usize);
 
-    fn deinit(self: *Userdata) void {
-        self.node_id_idx_map.deinit();
-        self.way_tags.deinit();
-        self.this_way_nodes.deinit();
-        for (self.this_way_tags.items) |tag| {
+const WayCache = struct {
+    alloc: Allocator,
+    found_highway: bool = false,
+    tags: std.ArrayList(Metadata.Tag),
+    nodes: std.ArrayList(u32),
+
+    fn deinit(self: *WayCache) void {
+        self.nodes.deinit();
+        for (self.tags.items) |tag| {
             self.alloc.free(tag.key);
             self.alloc.free(tag.val);
         }
-        self.this_way_tags.deinit();
+        self.tags.deinit();
+    }
+
+    fn pushNode(self: *WayCache, node_id: i64, node_idx_lookup: *const NodeIdIdxMap) void {
+        const node_idx = node_idx_lookup.get(node_id) orelse return;
+        self.nodes.append(@intCast(node_idx)) catch unreachable;
+    }
+
+    fn pushTag(self: *WayCache, k: []const u8, v: []const u8) !void {
+        if (std.mem.eql(u8, k, "highway")) {
+            self.found_highway = true;
+        }
+
+        try self.tags.append(.{
+            .key = try self.alloc.dupe(u8, k),
+            .val = try self.alloc.dupe(u8, v),
+        });
+    }
+
+    fn reset(self: *WayCache) void {
+        self.found_highway = false;
+        for (self.tags.items) |tag| {
+            self.alloc.free(tag.key);
+            self.alloc.free(tag.val);
+        }
+        self.tags.clearRetainingCapacity();
+        self.nodes.clearRetainingCapacity();
+    }
+};
+
+const MapDataWriter = struct {
+    writer: std.io.AnyWriter,
+    node_id_idx_map: NodeIdIdxMap,
+    min_lat: f32 = std.math.floatMax(f32),
+    max_lat: f32 = -std.math.floatMax(f32),
+    min_lon: f32 = std.math.floatMax(f32),
+    max_lon: f32 = -std.math.floatMax(f32),
+
+    fn deinit(self: *MapDataWriter) void {
+        self.node_id_idx_map.deinit();
+    }
+
+    fn pushNode(self: *MapDataWriter, node_id: i64, lon: f32, lat: f32) void {
+        self.max_lon = @max(lon, self.max_lon);
+        self.min_lon = @min(lon, self.min_lon);
+        self.max_lat = @max(lat, self.max_lat);
+        self.min_lat = @min(lat, self.min_lat);
+
+        self.node_id_idx_map.put(node_id, self.node_id_idx_map.count()) catch return;
+
+        std.debug.assert(builtin.cpu.arch.endian() == .little);
+        self.writer.writeAll(std.mem.asBytes(&lon)) catch unreachable;
+        self.writer.writeAll(std.mem.asBytes(&lat)) catch unreachable;
+    }
+
+    fn pushWayNodes(self: *MapDataWriter, nodes: []const u32) void {
+        self.writer.writeInt(u32, 0xffffffff, .little) catch unreachable;
+        for (nodes) |node_idx| {
+            self.writer.writeInt(u32, node_idx, .little) catch unreachable;
+        }
+    }
+};
+
+const Userdata = struct {
+    alloc: Allocator,
+    data_writer: MapDataWriter,
+    way_tags: std.ArrayList([]Metadata.Tag),
+    in_way: bool = false,
+    way_cache: WayCache,
+
+    fn deinit(self: *Userdata) void {
+        self.data_writer.deinit();
+        self.way_cache.deinit();
+        self.way_tags.deinit();
     }
 
     fn handleNode(user_data: *Userdata, attrs: *XmlParser.XmlAttrIter) void {
-        defer user_data.num_nodes += 1;
-
         var lat_opt: ?[]const u8 = null;
         var lon_opt: ?[]const u8 = null;
         var node_id_opt: ?[]const u8 = null;
@@ -49,16 +114,7 @@ const Userdata = struct {
         const lat = std.fmt.parseFloat(f32, lat_s) catch return;
         const lon = std.fmt.parseFloat(f32, lon_s) catch return;
         const node_id = std.fmt.parseInt(i64, node_id_s, 10) catch return;
-        user_data.node_id_idx_map.put(node_id, user_data.num_nodes) catch return;
-
-        user_data.metadata.max_lon = @max(lon, user_data.metadata.max_lon);
-        user_data.metadata.min_lon = @min(lon, user_data.metadata.min_lon);
-        user_data.metadata.max_lat = @max(lat, user_data.metadata.max_lat);
-        user_data.metadata.min_lat = @min(lat, user_data.metadata.min_lat);
-
-        std.debug.assert(builtin.cpu.arch.endian() == .little);
-        user_data.points_out.writeAll(std.mem.asBytes(&lon)) catch unreachable;
-        user_data.points_out.writeAll(std.mem.asBytes(&lat)) catch unreachable;
+        user_data.data_writer.pushNode(node_id, lon, lat);
     }
 };
 
@@ -80,18 +136,12 @@ fn startElement(ctx: ?*anyopaque, name: []const u8, attrs: *XmlParser.XmlAttrIte
         return;
     } else if (std.mem.eql(u8, name, "way")) {
         user_data.in_way = true;
-        user_data.found_highway = false;
-        user_data.this_way_nodes.clearRetainingCapacity();
-        for (user_data.this_way_tags.items) |tag| {
-            user_data.alloc.free(tag.key);
-            user_data.alloc.free(tag.val);
-        }
-        user_data.this_way_tags.clearRetainingCapacity();
+        user_data.way_cache.reset();
     } else if (std.mem.eql(u8, name, "nd")) {
         const node_id_s = findAttributeVal("ref", attrs) orelse return;
         const node_id = std.fmt.parseInt(i64, node_id_s, 10) catch unreachable;
-        const node_idx = user_data.node_id_idx_map.get(node_id) orelse return;
-        user_data.this_way_nodes.append(@intCast(node_idx)) catch unreachable;
+        const node_idx = user_data.data_writer.node_id_idx_map.get(node_id) orelse return;
+        user_data.way_cache.nodes.append(@intCast(node_idx)) catch unreachable;
     } else if (std.mem.eql(u8, name, "tag")) {
         if (user_data.in_way) {
             var k_opt: ?[]const u8 = null;
@@ -107,14 +157,7 @@ fn startElement(ctx: ?*anyopaque, name: []const u8, attrs: *XmlParser.XmlAttrIte
             const k = k_opt orelse return;
             const v = v_opt orelse return;
 
-            if (std.mem.eql(u8, k, "highway")) {
-                user_data.found_highway = true;
-            }
-
-            user_data.this_way_tags.append(.{
-                .key = user_data.alloc.dupe(u8, k) catch return,
-                .val = user_data.alloc.dupe(u8, v) catch return,
-            }) catch unreachable;
+            user_data.way_cache.pushTag(k, v) catch unreachable;
         }
     }
 }
@@ -123,13 +166,10 @@ fn endElement(ctx: ?*anyopaque, name: []const u8) void {
     const user_data: *Userdata = @ptrCast(@alignCast(ctx));
     if (std.mem.eql(u8, name, "way")) {
         user_data.in_way = false;
-        if (user_data.found_highway) {
-            user_data.points_out.writeInt(u32, 0xffffffff, .little) catch unreachable;
-            for (user_data.this_way_nodes.items) |node_idx| {
-                user_data.points_out.writeInt(u32, node_idx, .little) catch unreachable;
-            }
-            user_data.way_tags.append(user_data.this_way_tags.toOwnedSlice() catch unreachable) catch unreachable;
-            user_data.this_way_tags.clearRetainingCapacity();
+        if (user_data.way_cache.found_highway) {
+            user_data.data_writer.pushWayNodes(user_data.way_cache.nodes.items);
+            user_data.way_tags.append(user_data.way_cache.tags.toOwnedSlice() catch unreachable) catch unreachable;
+            user_data.way_cache.reset();
         }
     }
 }
@@ -256,11 +296,16 @@ pub fn main() !void {
 
     var userdata = Userdata{
         .alloc = alloc,
-        .points_out = points_out_writer,
-        .node_id_idx_map = std.AutoHashMap(i64, usize).init(alloc),
+        .data_writer = .{
+            .node_id_idx_map = NodeIdIdxMap.init(alloc),
+            .writer = points_out_writer,
+        },
+        .way_cache = .{
+            .alloc = alloc,
+            .tags = std.ArrayList(Metadata.Tag).init(alloc),
+            .nodes = std.ArrayList(u32).init(alloc),
+        },
         .way_tags = std.ArrayList([]Metadata.Tag).init(alloc),
-        .this_way_tags = std.ArrayList(Metadata.Tag).init(alloc),
-        .this_way_nodes = std.ArrayList(u32).init(alloc),
     };
     defer userdata.deinit();
 
@@ -271,16 +316,22 @@ pub fn main() !void {
     });
 
     const metadata_out_f = try std.fs.cwd().createFile(metadata_path, .{});
-    userdata.metadata.end_nodes = userdata.num_nodes * 8;
-    userdata.metadata.way_tags = try userdata.way_tags.toOwnedSlice();
-    try std.json.stringify(userdata.metadata, .{}, metadata_out_f.writer());
+    const metadata = Metadata{
+        .min_lat = userdata.data_writer.min_lat,
+        .max_lat = userdata.data_writer.max_lat,
+        .min_lon = userdata.data_writer.min_lon,
+        .max_lon = userdata.data_writer.max_lon,
+        .end_nodes = userdata.data_writer.node_id_idx_map.count() * 8,
+        .way_tags = try userdata.way_tags.toOwnedSlice(),
+    };
+    try std.json.stringify(metadata, .{}, metadata_out_f.writer());
 
-    for (userdata.metadata.way_tags) |way_tags| {
+    for (metadata.way_tags) |way_tags| {
         for (way_tags) |tag| {
             alloc.free(tag.key);
             alloc.free(tag.val);
         }
         alloc.free(way_tags);
     }
-    alloc.free(userdata.metadata.way_tags);
+    alloc.free(metadata.way_tags);
 }
