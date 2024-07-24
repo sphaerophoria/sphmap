@@ -19,6 +19,7 @@ pkgs.mkShell {
     vscode-langservers-extracted
     nodePackages.prettier
     nodePackages.jshint
+    linuxPackages_latest.perf
   ];
 }
 

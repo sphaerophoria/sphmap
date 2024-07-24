@@ -318,9 +318,25 @@ async function init() {
   };
   mod.instance.exports.setDebugPointNeighbors(debug_point_neighbors.checked);
 
+  const debug_path = document.getElementById("debug_path");
+  debug_path.onchange = (ev) => {
+    mod.instance.exports.setDebugPath(ev.target.checked);
+  };
+  mod.instance.exports.setDebugPath(debug_path.checked);
+
   const canvas_callbacks = new CanvasInputHandler(gl, canvas, mod);
   canvas_callbacks.setCanvasCallbacks();
   mod.instance.exports.render();
+
+  const start_path = document.getElementById("start_path");
+  start_path.onclick = () => {
+    mod.instance.exports.startPath();
+  };
+
+  const stop_path = document.getElementById("stop_path");
+  stop_path.onclick = () => {
+    mod.instance.exports.stopPath();
+  };
 }
 
 window.onload = init;

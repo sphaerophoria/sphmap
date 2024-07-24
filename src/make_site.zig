@@ -10,7 +10,7 @@ const WayCache = struct {
     alloc: Allocator,
     found_highway: bool = false,
     tags: std.ArrayList(Metadata.Tag),
-    nodes: std.ArrayList(u32),
+    nodes: std.ArrayList(i64),
 
     fn deinit(self: *WayCache) void {
         self.nodes.deinit();
@@ -21,9 +21,8 @@ const WayCache = struct {
         self.tags.deinit();
     }
 
-    fn pushNode(self: *WayCache, node_id: i64, node_idx_lookup: *const NodeIdIdxMap) void {
-        const node_idx = node_idx_lookup.get(node_id) orelse return;
-        self.nodes.append(@intCast(node_idx)) catch unreachable;
+    fn pushNode(self: *WayCache, node_id: i64) void {
+        self.nodes.append(node_id) catch unreachable;
     }
 
     fn pushTag(self: *WayCache, k: []const u8, v: []const u8) !void {
@@ -73,25 +72,36 @@ const MapDataWriter = struct {
         self.writer.writeAll(std.mem.asBytes(&lat)) catch unreachable;
     }
 
-    fn pushWayNodes(self: *MapDataWriter, nodes: []const u32) void {
+    fn pushWayNodes(self: *MapDataWriter, nodes: []const i64) void {
         self.writer.writeInt(u32, 0xffffffff, .little) catch unreachable;
-        for (nodes) |node_idx| {
-            self.writer.writeInt(u32, node_idx, .little) catch unreachable;
+        for (nodes) |node_id| {
+            const node_idx = self.node_id_idx_map.get(node_id) orelse unreachable;
+            self.writer.writeInt(u32, @intCast(node_idx), .little) catch unreachable;
         }
     }
 };
 
+const NodeData = struct {
+    lon: f32,
+    lat: f32,
+};
+
 const Userdata = struct {
     alloc: Allocator,
-    data_writer: MapDataWriter,
     way_tags: std.ArrayList([]Metadata.Tag),
     in_way: bool = false,
+    node_storage: std.AutoHashMap(i64, NodeData),
+    way_nodes: std.ArrayList([]i64),
     way_cache: WayCache,
 
     fn deinit(self: *Userdata) void {
-        self.data_writer.deinit();
         self.way_cache.deinit();
         self.way_tags.deinit();
+        self.node_storage.deinit();
+        for (self.way_nodes.items) |item| {
+            self.alloc.free(item);
+        }
+        self.way_nodes.deinit();
     }
 
     fn handleNode(user_data: *Userdata, attrs: *XmlParser.XmlAttrIter) void {
@@ -114,7 +124,10 @@ const Userdata = struct {
         const lat = std.fmt.parseFloat(f32, lat_s) catch return;
         const lon = std.fmt.parseFloat(f32, lon_s) catch return;
         const node_id = std.fmt.parseInt(i64, node_id_s, 10) catch return;
-        user_data.data_writer.pushNode(node_id, lon, lat);
+        user_data.node_storage.put(node_id, .{
+            .lon = lon,
+            .lat = lat,
+        }) catch return;
     }
 };
 
@@ -138,10 +151,11 @@ fn startElement(ctx: ?*anyopaque, name: []const u8, attrs: *XmlParser.XmlAttrIte
         user_data.in_way = true;
         user_data.way_cache.reset();
     } else if (std.mem.eql(u8, name, "nd")) {
-        const node_id_s = findAttributeVal("ref", attrs) orelse return;
-        const node_id = std.fmt.parseInt(i64, node_id_s, 10) catch unreachable;
-        const node_idx = user_data.data_writer.node_id_idx_map.get(node_id) orelse return;
-        user_data.way_cache.nodes.append(@intCast(node_idx)) catch unreachable;
+        if (user_data.in_way) {
+            const node_id_s = findAttributeVal("ref", attrs) orelse return;
+            const node_id = std.fmt.parseInt(i64, node_id_s, 10) catch unreachable;
+            user_data.way_cache.pushNode(node_id);
+        }
     } else if (std.mem.eql(u8, name, "tag")) {
         if (user_data.in_way) {
             var k_opt: ?[]const u8 = null;
@@ -167,7 +181,7 @@ fn endElement(ctx: ?*anyopaque, name: []const u8) void {
     if (std.mem.eql(u8, name, "way")) {
         user_data.in_way = false;
         if (user_data.way_cache.found_highway) {
-            user_data.data_writer.pushWayNodes(user_data.way_cache.nodes.items);
+            user_data.way_nodes.append(user_data.way_cache.nodes.toOwnedSlice() catch unreachable) catch unreachable;
             user_data.way_tags.append(user_data.way_cache.tags.toOwnedSlice() catch unreachable) catch unreachable;
             user_data.way_cache.reset();
         }
@@ -296,16 +310,14 @@ pub fn main() !void {
 
     var userdata = Userdata{
         .alloc = alloc,
-        .data_writer = .{
-            .node_id_idx_map = NodeIdIdxMap.init(alloc),
-            .writer = points_out_writer,
-        },
         .way_cache = .{
             .alloc = alloc,
             .tags = std.ArrayList(Metadata.Tag).init(alloc),
-            .nodes = std.ArrayList(u32).init(alloc),
+            .nodes = std.ArrayList(i64).init(alloc),
         },
         .way_tags = std.ArrayList([]Metadata.Tag).init(alloc),
+        .node_storage = std.AutoHashMap(i64, NodeData).init(alloc),
+        .way_nodes = std.ArrayList([]i64).init(alloc),
     };
     defer userdata.deinit();
 
@@ -315,13 +327,36 @@ pub fn main() !void {
         .endElement = endElement,
     });
 
+    var data_writer = MapDataWriter{
+        .node_id_idx_map = NodeIdIdxMap.init(alloc),
+        .writer = points_out_writer,
+    };
+    defer data_writer.deinit();
+
+    var seen_node_ids = std.AutoHashMap(i64, void).init(alloc);
+    defer seen_node_ids.deinit();
+
+    for (userdata.way_nodes.items) |way_nodes| {
+        for (way_nodes) |node_id| {
+            const seen = try seen_node_ids.getOrPut(node_id);
+            if (!seen.found_existing) {
+                const node: NodeData = userdata.node_storage.get(node_id) orelse return error.NoNode;
+                data_writer.pushNode(node_id, node.lon, node.lat);
+            }
+        }
+    }
+
+    for (userdata.way_nodes.items) |way_nodes| {
+        data_writer.pushWayNodes(way_nodes);
+    }
+
     const metadata_out_f = try std.fs.cwd().createFile(metadata_path, .{});
     const metadata = Metadata{
-        .min_lat = userdata.data_writer.min_lat,
-        .max_lat = userdata.data_writer.max_lat,
-        .min_lon = userdata.data_writer.min_lon,
-        .max_lon = userdata.data_writer.max_lon,
-        .end_nodes = userdata.data_writer.node_id_idx_map.count() * 8,
+        .min_lat = data_writer.min_lat,
+        .max_lat = data_writer.max_lat,
+        .min_lon = data_writer.min_lon,
+        .max_lon = data_writer.max_lon,
+        .end_nodes = data_writer.node_id_idx_map.count() * 8,
         .way_tags = try userdata.way_tags.toOwnedSlice(),
     };
     try std.json.stringify(metadata, .{}, metadata_out_f.writer());

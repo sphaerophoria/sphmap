@@ -31,9 +31,9 @@ pub fn main() !void {
     defer app.deinit();
 
     app.onMouseDown(0.5, 0.5);
-    app.onMouseMove(0.4, 0.4);
-    app.onMouseMove(0.5, 0.6);
-    app.onMouseMove(0.6, 0.6);
+    try app.onMouseMove(0.4, 0.4);
+    try app.onMouseMove(0.5, 0.6);
+    try app.onMouseMove(0.6, 0.6);
     app.onMouseUp();
 
     app.zoomIn();

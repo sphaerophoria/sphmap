@@ -52,7 +52,10 @@ pub export fn mouseDown(x_norm: f32, y_norm: f32) void {
 }
 
 pub export fn mouseMove(x_norm: f32, y_norm: f32) void {
-    global.app.onMouseMove(x_norm, y_norm);
+    global.app.onMouseMove(x_norm, y_norm) catch |e| {
+        print("e: {any}", .{e});
+        unreachable;
+    };
 }
 
 pub export fn mouseUp() void {
@@ -91,4 +94,17 @@ pub export fn setDebugWayFinding(val: bool) void {
 pub export fn setDebugPointNeighbors(val: bool) void {
     global.app.debug_point_neighbors = val;
     global.app.render();
+}
+
+pub export fn setDebugPath(val: bool) void {
+    global.app.debug_path_finding = val;
+    global.app.render();
+}
+
+pub export fn startPath() void {
+    global.app.startPath();
+}
+
+pub export fn stopPath() void {
+    global.app.stopPath();
 }
