@@ -5,8 +5,10 @@ const Builder = struct {
     opt: std.builtin.OptimizeMode,
     target: std.Build.ResolvedTarget,
     wasm_target: std.Build.ResolvedTarget,
+    check_step: *std.Build.Step,
 
     fn init(b: *std.Build) Builder {
+        const check_step = b.step("check", "check");
         return .{
             .b = b,
             .opt = b.standardOptimizeOption(.{}),
@@ -14,7 +16,15 @@ const Builder = struct {
             .wasm_target = b.resolveTargetQuery(std.zig.CrossTarget.parse(
                 .{ .arch_os_abi = "wasm32-freestanding" },
             ) catch unreachable),
+            .check_step = check_step,
         };
+    }
+
+    fn installAndCheck(self: *Builder, elem: *std.Build.Step.Compile) void {
+        const duped = self.b.allocator.create(std.Build.Step.Compile) catch unreachable;
+        duped.* = elem.*;
+        self.b.installArtifact(elem);
+        self.check_step.dependOn(&duped.step);
     }
 
     fn generateMapData(self: *Builder) void {
@@ -26,7 +36,7 @@ const Builder = struct {
         });
         exe.linkSystemLibrary("expat");
         exe.linkLibC();
-        self.b.installArtifact(exe);
+        self.installAndCheck(exe);
     }
 
     fn makeGuiLib(self: *Builder) *std.Build.Step.Compile {
@@ -48,7 +58,7 @@ const Builder = struct {
         wasm.entry = .disabled;
         wasm.rdynamic = true;
 
-        self.b.installArtifact(wasm);
+        self.installAndCheck(wasm);
     }
 
     fn buildLocalApp(self: *Builder, libgui: *std.Build.Step.Compile) void {
@@ -59,7 +69,7 @@ const Builder = struct {
             .optimize = self.opt,
         });
         exe.linkLibrary(libgui);
-        self.b.installArtifact(exe);
+        self.installAndCheck(exe);
     }
 };
 
