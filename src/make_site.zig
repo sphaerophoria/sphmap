@@ -6,10 +6,15 @@ const Allocator = std.mem.Allocator;
 
 const NodeIdIdxMap = std.AutoHashMap(i64, usize);
 
+const StringTag = struct {
+    key: []const u8,
+    val: []const u8,
+};
+
 const WayCache = struct {
     alloc: Allocator,
     found_highway: bool = false,
-    tags: std.ArrayList(Metadata.Tag),
+    tags: std.ArrayList(StringTag),
     nodes: std.ArrayList(i64),
 
     fn deinit(self: *WayCache) void {
@@ -79,6 +84,12 @@ const MapDataWriter = struct {
             self.writer.writeInt(u32, @intCast(node_idx), .little) catch unreachable;
         }
     }
+
+    fn pushStringTableString(self: *MapDataWriter, s: []const u8) !void {
+        comptime std.debug.assert(builtin.cpu.arch.endian() == .little);
+        try self.writer.writeInt(u16, @intCast(s.len), .little);
+        try self.writer.writeAll(s);
+    }
 };
 
 const NodeData = struct {
@@ -86,16 +97,58 @@ const NodeData = struct {
     lat: f32,
 };
 
+const StringTable = struct {
+    alloc: Allocator,
+    string_table: std.StringHashMap(usize),
+    string_table_data: std.ArrayList([]const u8),
+
+    fn init(alloc: Allocator) StringTable {
+        return .{
+            .alloc = alloc,
+            .string_table = std.StringHashMap(usize).init(alloc),
+            .string_table_data = std.ArrayList([]const u8).init(alloc),
+        };
+    }
+
+    fn deinit(self: *StringTable) void {
+        for (self.string_table_data.items) |item| {
+            self.alloc.free(item);
+        }
+
+        self.string_table.deinit();
+        self.string_table_data.deinit();
+    }
+
+    fn pushOrFree(self: *StringTable, s: []const u8) usize {
+        const res = self.string_table.getOrPut(s) catch unreachable;
+        if (!res.found_existing) {
+            self.string_table_data.append(s) catch unreachable;
+            res.value_ptr.* = self.string_table_data.items.len - 1;
+        } else {
+            self.alloc.free(s);
+        }
+
+        return res.value_ptr.*;
+    }
+};
+
+const StringTableIndex = usize;
 const Userdata = struct {
     alloc: Allocator,
-    way_tags: std.ArrayList([]Metadata.Tag),
+    way_tags: std.ArrayList(Metadata.Tags),
     in_way: bool = false,
     node_storage: std.AutoHashMap(i64, NodeData),
     way_nodes: std.ArrayList([]i64),
     way_cache: WayCache,
+    string_table: StringTable,
 
     fn deinit(self: *Userdata) void {
+        self.string_table.deinit();
         self.way_cache.deinit();
+        for (self.way_tags.items) |item| {
+            self.alloc.free(item[0]);
+            self.alloc.free(item[1]);
+        }
         self.way_tags.deinit();
         self.node_storage.deinit();
         for (self.way_nodes.items) |item| {
@@ -182,7 +235,22 @@ fn endElement(ctx: ?*anyopaque, name: []const u8) void {
         user_data.in_way = false;
         if (user_data.way_cache.found_highway) {
             user_data.way_nodes.append(user_data.way_cache.nodes.toOwnedSlice() catch unreachable) catch unreachable;
-            user_data.way_tags.append(user_data.way_cache.tags.toOwnedSlice() catch unreachable) catch unreachable;
+            var this_way_tag_keys = user_data.alloc.alloc(usize, user_data.way_cache.tags.items.len) catch unreachable;
+            var this_way_tag_vals = user_data.alloc.alloc(usize, user_data.way_cache.tags.items.len) catch unreachable;
+
+            for (user_data.way_cache.tags.items, 0..) |tag, i| {
+                const k = user_data.string_table.pushOrFree(tag.key);
+                const v = user_data.string_table.pushOrFree(tag.val);
+
+                this_way_tag_keys[i] = k;
+                this_way_tag_vals[i] = v;
+            }
+
+            user_data.way_tags.append(.{
+                this_way_tag_keys,
+                this_way_tag_vals,
+            }) catch unreachable;
+            user_data.way_cache.tags.clearRetainingCapacity();
             user_data.way_cache.reset();
         }
     }
@@ -304,20 +372,25 @@ pub fn main() !void {
     defer alloc.free(metadata_path);
 
     const out_f = try std.fs.cwd().createFile(map_data_path, .{});
+    defer out_f.close();
+
     var points_out_buf_writer = std.io.bufferedWriter(out_f.writer());
-    defer points_out_buf_writer.flush() catch unreachable;
-    const points_out_writer = points_out_buf_writer.writer().any();
+    defer points_out_buf_writer.flush() catch |e| {
+        std.log.err("Failed to flush: {any}", .{e});
+    };
+    var counting_writer = std.io.countingWriter(points_out_buf_writer.writer());
 
     var userdata = Userdata{
         .alloc = alloc,
         .way_cache = .{
             .alloc = alloc,
-            .tags = std.ArrayList(Metadata.Tag).init(alloc),
+            .tags = std.ArrayList(StringTag).init(alloc),
             .nodes = std.ArrayList(i64).init(alloc),
         },
-        .way_tags = std.ArrayList([]Metadata.Tag).init(alloc),
+        .way_tags = std.ArrayList(Metadata.Tags).init(alloc),
         .node_storage = std.AutoHashMap(i64, NodeData).init(alloc),
         .way_nodes = std.ArrayList([]i64).init(alloc),
+        .string_table = StringTable.init(alloc),
     };
     defer userdata.deinit();
 
@@ -329,7 +402,7 @@ pub fn main() !void {
 
     var data_writer = MapDataWriter{
         .node_id_idx_map = NodeIdIdxMap.init(alloc),
-        .writer = points_out_writer,
+        .writer = counting_writer.writer().any(),
     };
     defer data_writer.deinit();
 
@@ -350,6 +423,12 @@ pub fn main() !void {
         data_writer.pushWayNodes(way_nodes);
     }
 
+    const end_ways = counting_writer.bytes_written;
+
+    for (userdata.string_table.string_table_data.items) |item| {
+        try data_writer.pushStringTableString(item);
+    }
+
     const metadata_out_f = try std.fs.cwd().createFile(metadata_path, .{});
     const metadata = Metadata{
         .min_lat = data_writer.min_lat,
@@ -357,16 +436,14 @@ pub fn main() !void {
         .min_lon = data_writer.min_lon,
         .max_lon = data_writer.max_lon,
         .end_nodes = data_writer.node_id_idx_map.count() * 8,
+        .end_ways = end_ways,
         .way_tags = try userdata.way_tags.toOwnedSlice(),
     };
     try std.json.stringify(metadata, .{}, metadata_out_f.writer());
 
     for (metadata.way_tags) |way_tags| {
-        for (way_tags) |tag| {
-            alloc.free(tag.key);
-            alloc.free(tag.val);
-        }
-        alloc.free(way_tags);
+        alloc.free(way_tags[0]);
+        alloc.free(way_tags[1]);
     }
     alloc.free(metadata.way_tags);
 }

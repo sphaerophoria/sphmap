@@ -103,6 +103,9 @@ class WasmHandler {
 
   logWasm(s, len) {
     const buf = new Uint8Array(this.memory.buffer, s, len);
+    if (len == 0) {
+      return;
+    }
     console.log(new TextDecoder("utf8").decode(buf));
   }
 

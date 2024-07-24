@@ -15,6 +15,7 @@ const NodeId = map_data.NodeId;
 const WayLookup = map_data.WayLookup;
 const Way = map_data.Way;
 const WayId = map_data.WayId;
+const StringTable = map_data.StringTable;
 const gui = @import("gui_bindings.zig");
 const ViewState = Renderer.ViewState;
 
@@ -27,6 +28,7 @@ renderer: Renderer,
 view_state: ViewState,
 points: PointLookup,
 ways: WayLookup,
+string_table: StringTable,
 adjacency_map: NodeAdjacencyMap,
 way_buckets: WayBuckets,
 path_start: ?NodeId = null,
@@ -55,7 +57,11 @@ pub fn init(alloc: Allocator, aspect_val: f32, map_data_buf: []u8, metadata: *co
         lon.* = lon_step * (lon.* - metadata.min_lon);
     }
 
-    const index_data: []const u32 = @alignCast(std.mem.bytesAsSlice(u32, map_data_buf[@intCast(metadata.end_nodes)..]));
+    const index_data: []const u32 = @alignCast(std.mem.bytesAsSlice(u32, map_data_buf[@intCast(metadata.end_nodes)..@intCast(metadata.end_ways)]));
+
+    const string_table_data: []const u8 = map_data_buf[@intCast(metadata.end_ways)..];
+    var string_table = try StringTable.init(alloc, string_table_data);
+    errdefer string_table.deinit(alloc);
 
     const view_state = ViewState{
         .center = .{
@@ -90,6 +96,7 @@ pub fn init(alloc: Allocator, aspect_val: f32, map_data_buf: []u8, metadata: *co
         .points = point_lookup,
         .ways = way_lookup,
         .way_buckets = way_buckets,
+        .string_table = string_table,
     };
 }
 
@@ -97,6 +104,7 @@ pub fn deinit(self: *App) void {
     self.adjacency_map.deinit(self.alloc);
     self.ways.deinit(self.alloc);
     self.way_buckets.deinit();
+    self.string_table.deinit(self.alloc);
 }
 
 pub fn onMouseDown(self: *App, x: f32, y: f32) void {
@@ -155,8 +163,11 @@ pub fn onMouseMove(self: *App, x: f32, y: f32) !void {
 
     gui.clearTags();
     if (calc.min_way.value < self.metadata.way_tags.len) {
-        for (self.metadata.way_tags[calc.min_way.value]) |tag| {
-            gui.pushTag(tag.key.ptr, tag.key.len, tag.val.ptr, tag.val.len);
+        const way_tags = self.metadata.way_tags[calc.min_way.value];
+        for (0..way_tags[0].len) |i| {
+            const key = self.string_table.get(way_tags[0][i]);
+            const val = self.string_table.get(way_tags[1][i]);
+            gui.pushTag(key.ptr, key.len, val.ptr, val.len);
         }
     }
 

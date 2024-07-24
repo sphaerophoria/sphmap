@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const lin = @import("lin.zig");
 const MapPos = lin.Point;
+const builtin = @import("builtin");
 
 pub const NodeId = struct {
     value: u32,
@@ -128,5 +129,46 @@ pub const IndexBufferIt = struct {
             .start = start,
             .end = end,
         };
+    }
+};
+
+pub const StringTableId = usize;
+
+pub const StringTable = struct {
+    data: []const []const u8,
+
+    pub fn init(alloc: Allocator, buf: []const u8) !StringTable {
+        var data = std.ArrayList([]const u8).init(alloc);
+        defer data.deinit();
+
+        var it: usize = 0;
+        while (it < buf.len) {
+            comptime std.debug.assert(builtin.cpu.arch.endian() == .little);
+            const len_end = it + 2;
+            if (len_end >= buf.len) {
+                return error.InvalidData;
+            }
+
+            const str_len = std.mem.bytesToValue(u16, buf[it..len_end]);
+            const str_end = str_len + len_end;
+            defer it = str_end;
+
+            if (str_end > buf.len) {
+                return error.InvalidData;
+            }
+
+            const s = buf[len_end..str_end];
+            try data.append(s);
+        }
+
+        return .{ .data = try data.toOwnedSlice() };
+    }
+
+    pub fn deinit(self: *StringTable, alloc: Allocator) void {
+        alloc.free(self.data);
+    }
+
+    pub fn get(self: *const StringTable, id: StringTableId) []const u8 {
+        return self.data[id];
     }
 };
