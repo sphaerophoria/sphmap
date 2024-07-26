@@ -11,6 +11,7 @@ const Args = struct {
     map_data_bin: []const u8,
     map_data_json: []const u8,
     num_iters: usize,
+    turning_cost: f32,
     it: std.process.ArgIterator,
 
     const Option = enum {
@@ -19,6 +20,7 @@ const Args = struct {
         @"--start-id",
         @"--end-id",
         @"--num-iters",
+        @"--turning-cost",
         @"--help",
     };
 
@@ -32,6 +34,7 @@ const Args = struct {
         var end: ?map_data.NodeId = null;
         var map_data_bin: ?[]const u8 = null;
         var map_data_json: ?[]const u8 = null;
+        var turning_cost: ?f32 = null;
         var num_iters: usize = 5;
 
         while (it.next()) |s| {
@@ -74,6 +77,13 @@ const Args = struct {
                         help(process_name);
                     };
                 },
+                .@"--turning-cost" => {
+                    const turning_cost_s = getArg(&it, opt, process_name);
+                    turning_cost = std.fmt.parseFloat(f32, turning_cost_s) catch {
+                        std.debug.print("{s} is not a valid f32\n", .{turning_cost_s});
+                        help(process_name);
+                    };
+                },
                 .@"--help" => {
                     help(process_name);
                 },
@@ -86,6 +96,7 @@ const Args = struct {
             .map_data_bin = unwrapArg(map_data_bin, Option.@"--map-data-bin", process_name),
             .map_data_json = unwrapArg(map_data_json, Option.@"--map-data-json", process_name),
             .num_iters = num_iters,
+            .turning_cost = unwrapArg(turning_cost, Option.@"--turning-cost", process_name),
             .it = it,
         };
     }
@@ -129,6 +140,9 @@ const Args = struct {
                 },
                 .@"--num-iters" => {
                     std.debug.print("[number of times to run planner] OPTIONAL", .{});
+                },
+                .@"--turning-cost" => {
+                    std.debug.print("[turning cost]", .{});
                 },
                 .@"--help" => {
                     std.debug.print("Show this help", .{});
@@ -195,11 +209,15 @@ pub fn main() !void {
     var adjacency_map = try makeAdjacencyMap(alloc, &point_lookup, split_data.index_data);
     defer adjacency_map.deinit(alloc);
 
+    const start = try std.time.Instant.now();
     for (0..args.num_iters) |_| {
-        var pp = try PathPlanner.init(alloc, &point_lookup, &adjacency_map, args.start, args.end);
+        var pp = try PathPlanner.init(alloc, &point_lookup, &adjacency_map, args.start, args.end, args.turning_cost);
         defer pp.deinit();
 
         const path = try pp.run();
         alloc.free(path);
     }
+    const end = try std.time.Instant.now();
+
+    std.debug.print("average pp time: {d}\n", .{end.since(start) / 1000 / 1000 / args.num_iters});
 }

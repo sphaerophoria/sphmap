@@ -62,7 +62,6 @@ pub export fn mouseDown(x_norm: f32, y_norm: f32) void {
 pub export fn mouseMove(x_norm: f32, y_norm: f32) void {
     global.app.onMouseMove(x_norm, y_norm) catch |e| {
         print("e: {any}", .{e});
-        unreachable;
     };
 }
 
@@ -118,4 +117,8 @@ pub export fn startPath() void {
 
 pub export fn stopPath() void {
     global.app.stopPath();
+}
+
+pub export fn setTurningCost(cost: f32) void {
+    global.app.turning_cost = cost;
 }

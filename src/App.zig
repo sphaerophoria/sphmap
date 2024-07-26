@@ -33,6 +33,7 @@ adjacency_map: NodeAdjacencyMap,
 way_buckets: WayBuckets,
 path_start: ?NodeId = null,
 closest_node: NodeId = NodeId{ .value = 0 },
+turning_cost: f32 = 0.0,
 debug_way_finding: bool = false,
 debug_point_neighbors: bool = false,
 debug_path_finding: bool = false,
@@ -181,7 +182,7 @@ pub fn onMouseMove(self: *App, x: f32, y: f32) !void {
         bound_renderer.renderPoints(&.{node_id}, Renderer.Gl.POINTS);
 
         if (self.path_start) |path_start| {
-            var pp = try PathPlanner.init(self.alloc, &self.points, &self.adjacency_map, path_start, node_id);
+            var pp = try PathPlanner.init(self.alloc, &self.points, &self.adjacency_map, path_start, node_id, self.turning_cost);
             defer pp.deinit();
 
             if (pp.run()) |new_path| {
@@ -190,9 +191,14 @@ pub fn onMouseMove(self: *App, x: f32, y: f32) !void {
                 var seen_gscores = std.ArrayList(NodeId).init(self.alloc);
                 defer seen_gscores.deinit();
 
-                for (pp.gscores, 0..) |score, i| {
-                    if (score != std.math.inf(f32)) {
-                        try seen_gscores.append(NodeId{ .value = @intCast(i) });
+                for (0..pp.gscores.segment_starts.len - 1) |i| {
+                    const start = pp.gscores.segment_starts[i];
+                    const end = pp.gscores.segment_starts[i + 1];
+                    for (pp.gscores.storage[start..end]) |score| {
+                        if (score != std.math.inf(f32)) {
+                            try seen_gscores.append(.{ .value = @intCast(i) });
+                            break;
+                        }
                     }
                 }
 

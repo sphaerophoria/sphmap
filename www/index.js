@@ -346,6 +346,11 @@ async function init() {
   stop_path.onclick = () => {
     mod.instance.exports.stopPath();
   };
+
+  const turning_cost = document.getElementById("turning_cost");
+  turning_cost.oninput = (ev) => {
+    mod.instance.exports.setTurningCost(ev.target.value);
+  };
 }
 
 window.onload = init;
