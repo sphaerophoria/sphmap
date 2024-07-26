@@ -1,238 +1,24 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Metadata = @import("Metadata.zig");
+const MouseTracker = @import("MouseTracker.zig");
+const map_data = @import("map_data.zig");
 const lin = @import("lin.zig");
+const PathPlanner = @import("PathPlanner.zig");
+const Renderer = @import("Renderer.zig");
 const Point = lin.Point;
 const Vec = lin.Vec;
 const MapPos = lin.Point;
+const PointLookup = map_data.PointLookup;
+const NodeAdjacencyMap = map_data.NodeAdjacencyMap;
+const NodeId = map_data.NodeId;
+const WayLookup = map_data.WayLookup;
+const Way = map_data.Way;
+const WayId = map_data.WayId;
+const gui = @import("gui_bindings.zig");
+const ViewState = Renderer.ViewState;
 
 const App = @This();
-
-const NodeId = struct {
-    value: u32,
-};
-
-const WayId = struct {
-    value: usize,
-};
-
-const WayLookup = struct {
-    ways: []const Way,
-
-    fn deinit(self: *WayLookup, alloc: Allocator) void {
-        alloc.free(self.ways);
-    }
-
-    fn get(self: *const WayLookup, id: WayId) Way {
-        return self.ways[id.value];
-    }
-};
-
-const IndexRange = struct {
-    start: usize,
-    end: usize,
-};
-
-pub const PathPlanner = struct {
-    alloc: Allocator,
-    points: *const PointLookup,
-    adjacency_map: *const NodeAdjacencyMap,
-    gscores: []f32,
-    came_from: []NodeId,
-    q: std.PriorityQueue(NodeWithFscore, void, PathPlanner.order),
-    start: NodeId,
-    end: NodeId,
-
-    const NodeWithFscore = struct {
-        id: NodeId,
-        fscore: f32,
-    };
-
-    pub fn init(alloc: Allocator, points: *const PointLookup, adjacency_map: *const NodeAdjacencyMap, start: NodeId, end: NodeId) !PathPlanner {
-        const num_points = points.numPoints();
-
-        const gscores = try alloc.alloc(f32, num_points);
-        errdefer alloc.free(gscores);
-        @memset(gscores, std.math.inf(f32));
-        gscores[start.value] = 0;
-
-        const came_from = try alloc.alloc(NodeId, points.numPoints());
-        errdefer alloc.free(came_from);
-
-        var q = std.PriorityQueue(NodeWithFscore, void, PathPlanner.order).init(alloc, {});
-        errdefer q.deinit();
-        try q.ensureTotalCapacity(500);
-
-        var ret = PathPlanner{
-            .alloc = alloc,
-            .points = points,
-            .adjacency_map = adjacency_map,
-            .gscores = gscores,
-            .came_from = came_from,
-            .q = q,
-            .start = start,
-            .end = end,
-        };
-
-        try ret.q.add(.{
-            .id = start,
-            .fscore = ret.distance(start, end),
-        });
-
-        return ret;
-    }
-
-    pub fn deinit(self: *PathPlanner) void {
-        self.alloc.free(self.gscores);
-        self.alloc.free(self.came_from);
-        self.q.deinit();
-    }
-
-    fn distance(self: *PathPlanner, a_id: NodeId, b_id: NodeId) f32 {
-        const a = self.points.get(a_id);
-        const b = self.points.get(b_id);
-
-        return b.sub(a).length();
-    }
-
-    fn order(_: void, a: NodeWithFscore, b: NodeWithFscore) std.math.Order {
-        return std.math.order(a.fscore, b.fscore);
-    }
-
-    fn reconstructPath(self: *PathPlanner) ![]const NodeId {
-        var ret = std.ArrayList(NodeId).init(self.alloc);
-        defer ret.deinit();
-
-        var it = self.end;
-        while (it.value != self.start.value) {
-            try ret.append(it);
-            it = self.came_from[it.value];
-        }
-        return try ret.toOwnedSlice();
-    }
-
-    fn updateNeighbor(self: *PathPlanner, current: NodeId, neighbor: NodeId, current_score: f32) !void {
-        const tentative_score = current_score + self.distance(current, neighbor);
-        if (tentative_score >= self.gscores[neighbor.value]) {
-            return;
-        }
-
-        self.gscores[neighbor.value] = tentative_score;
-        const fscore = tentative_score + self.distance(neighbor, self.end);
-        self.came_from[neighbor.value] = current;
-
-        const neighbor_w_fscore = NodeWithFscore{
-            .id = neighbor,
-            .fscore = fscore,
-        };
-
-        try self.q.add(neighbor_w_fscore);
-    }
-
-    fn step(self: *PathPlanner) !?[]const NodeId {
-        const current_node_id = self.q.removeOrNull() orelse return error.NoPath;
-        if (current_node_id.id.value == self.end.value) {
-            return try self.reconstructPath();
-        }
-
-        const neighbors = self.adjacency_map.getNeighbors(current_node_id.id);
-        const current_gscore = self.gscores[current_node_id.id.value];
-
-        for (neighbors) |neighbor| {
-            try self.updateNeighbor(current_node_id.id, neighbor, current_gscore);
-        }
-
-        return null;
-    }
-
-    pub fn run(self: *PathPlanner) ![]const NodeId {
-        while (true) {
-            if (try self.step()) |val| {
-                return val;
-            }
-        }
-    }
-};
-
-const NodeAdjacencyMap = struct {
-    // Where in storage this node's neighbors are. Indexed by NodeId
-    segment_starts: []u32,
-    // All neighbors for all nodes, Each node's neighbors are contiguous
-    storage: []const NodeId,
-
-    fn init(alloc: Allocator, node_neighbors: []std.AutoArrayHashMapUnmanaged(NodeId, void)) !NodeAdjacencyMap {
-        var storage = std.ArrayList(NodeId).init(alloc);
-        defer storage.deinit();
-
-        var segment_starts = std.ArrayList(u32).init(alloc);
-        defer segment_starts.deinit();
-
-        for (node_neighbors) |neighbors| {
-            try segment_starts.append(@intCast(storage.items.len));
-            try storage.appendSlice(neighbors.keys());
-        }
-        try segment_starts.append(@intCast(storage.items.len));
-
-        return .{
-            .storage = try storage.toOwnedSlice(),
-            .segment_starts = try segment_starts.toOwnedSlice(),
-        };
-    }
-
-    fn deinit(self: *NodeAdjacencyMap, alloc: Allocator) void {
-        alloc.free(self.storage);
-        alloc.free(self.segment_starts);
-    }
-
-    fn getNeighbors(self: *const NodeAdjacencyMap, node: NodeId) []const NodeId {
-        const start = self.segment_starts[node.value];
-        const end = self.segment_starts[node.value + 1];
-
-        return self.storage[start..end];
-    }
-};
-
-const Way = struct {
-    node_ids: []const NodeId,
-
-    fn fromIndexRange(range: IndexRange, index_buf: []const u32) Way {
-        return .{
-            .node_ids = @ptrCast(index_buf[range.start..range.end]),
-        };
-    }
-
-    fn indexRange(self: *const Way, index_buffer: []const u32) IndexRange {
-        const node_ids_ptr: usize = @intFromPtr(self.node_ids.ptr);
-        const index_buffer_ptr: usize = @intFromPtr(index_buffer.ptr);
-        const start = (node_ids_ptr - index_buffer_ptr) / @sizeOf(u32);
-        const end = start + self.node_ids.len;
-        return .{
-            .start = start,
-            .end = end,
-        };
-    }
-};
-
-const PointLookup = struct {
-    points: []const f32,
-
-    fn numPoints(self: *const PointLookup) usize {
-        return self.points.len / 2;
-    }
-
-    fn get(self: *const PointLookup, id: NodeId) MapPos {
-        return .{
-            .x = self.points[id.value * 2],
-            .y = self.points[id.value * 2 + 1],
-        };
-    }
-};
-
-const ViewState = struct {
-    center: MapPos,
-    zoom: f32,
-    aspect: f32,
-};
 
 alloc: Allocator,
 mouse_tracker: MouseTracker = .{},
@@ -249,8 +35,8 @@ debug_way_finding: bool = false,
 debug_point_neighbors: bool = false,
 debug_path_finding: bool = false,
 
-pub fn init(alloc: Allocator, aspect_val: f32, map_data: []u8, metadata: *const Metadata) !App {
-    const point_data: []f32 = @alignCast(std.mem.bytesAsSlice(f32, map_data[0..@intCast(metadata.end_nodes)]));
+pub fn init(alloc: Allocator, aspect_val: f32, map_data_buf: []u8, metadata: *const Metadata) !App {
+    const point_data: []f32 = @alignCast(std.mem.bytesAsSlice(f32, map_data_buf[0..@intCast(metadata.end_nodes)]));
 
     const center_lat = (metadata.min_lat + metadata.max_lat) / 2.0;
     const center_lon = (metadata.min_lon + metadata.max_lon) / 2.0;
@@ -269,7 +55,7 @@ pub fn init(alloc: Allocator, aspect_val: f32, map_data: []u8, metadata: *const 
         lon.* = lon_step * (lon.* - metadata.min_lon);
     }
 
-    const index_data: []const u32 = @alignCast(std.mem.bytesAsSlice(u32, map_data[@intCast(metadata.end_nodes)..]));
+    const index_data: []const u32 = @alignCast(std.mem.bytesAsSlice(u32, map_data_buf[@intCast(metadata.end_nodes)..]));
 
     const view_state = ViewState{
         .center = .{
@@ -361,16 +147,16 @@ pub fn onMouseMove(self: *App, x: f32, y: f32) !void {
         bound_renderer.inner.b.set(1.0);
         while (calc.step()) |debug| {
             bound_renderer.inner.point_size.set(std.math.pow(f32, std.math.e, -debug.dist * 0.05) * 50.0);
-            bound_renderer.renderCoords(&.{ debug.dist_loc.x, debug.dist_loc.y }, Gl.POINTS);
+            bound_renderer.renderCoords(&.{ debug.dist_loc.x, debug.dist_loc.y }, Renderer.Gl.POINTS);
         }
     } else {
         while (calc.step()) |_| {}
     }
 
-    js.clearTags();
+    gui.clearTags();
     if (calc.min_way.value < self.metadata.way_tags.len) {
         for (self.metadata.way_tags[calc.min_way.value]) |tag| {
-            js.pushTag(tag.key.ptr, tag.key.len, tag.val.ptr, tag.val.len);
+            gui.pushTag(tag.key.ptr, tag.key.len, tag.val.ptr, tag.val.len);
         }
     }
 
@@ -389,17 +175,17 @@ pub fn onMouseMove(self: *App, x: f32, y: f32) !void {
         const neighbors = self.adjacency_map.getNeighbors(node_id);
         if (self.debug_point_neighbors) {
             bound_renderer.inner.point_size.set(10.0);
-            bound_renderer.renderPoints(neighbors, Gl.POINTS);
+            bound_renderer.renderPoints(neighbors, Renderer.Gl.POINTS);
         }
         bound_renderer.renderSelectedWay(self.ways.get(calc.min_way));
         if (self.debug_way_finding) {
-            bound_renderer.renderCoords(&.{ self.view_state.center.x, self.view_state.center.y, calc.min_dist_loc.x, calc.min_dist_loc.y }, Gl.LINE_STRIP);
+            bound_renderer.renderCoords(&.{ self.view_state.center.x, self.view_state.center.y, calc.min_dist_loc.x, calc.min_dist_loc.y }, Renderer.Gl.LINE_STRIP);
         }
         bound_renderer.inner.r.set(1.0);
         bound_renderer.inner.g.set(1.0);
         bound_renderer.inner.b.set(1.0);
         bound_renderer.inner.point_size.set(10.0);
-        bound_renderer.renderPoints(&.{node_id}, Gl.POINTS);
+        bound_renderer.renderPoints(&.{node_id}, Renderer.Gl.POINTS);
 
         if (self.path_start) |path_start| {
             var pp = try PathPlanner.init(self.alloc, &self.points, &self.adjacency_map, path_start, node_id);
@@ -420,9 +206,9 @@ pub fn onMouseMove(self: *App, x: f32, y: f32) !void {
                 bound_renderer.inner.r.set(1.0);
                 bound_renderer.inner.g.set(0.0);
                 bound_renderer.inner.b.set(0.0);
-                bound_renderer.renderPoints(new_path, Gl.LINE_STRIP);
+                bound_renderer.renderPoints(new_path, Renderer.Gl.LINE_STRIP);
                 if (self.debug_path_finding) {
-                    bound_renderer.renderPoints(seen_gscores.items, Gl.POINTS);
+                    bound_renderer.renderPoints(seen_gscores.items, Renderer.Gl.POINTS);
                 }
             } else |e| {
                 std.log.err("err: {any} {d} {d}", .{ e, path_start.value, node_id.value });
@@ -470,7 +256,7 @@ fn parseIndexBuffer(
     defer ways.deinit();
 
     var way_buckets = try WayBuckets.init(alloc, width, height);
-    var it = IndexBufferIt.init(index_buffer);
+    var it = map_data.IndexBufferIt.init(index_buffer);
     var way_id: WayId = .{ .value = 0 };
 
     var node_neighbors = try alloc.alloc(std.AutoArrayHashMapUnmanaged(NodeId, void), point_lookup.numPoints());
@@ -504,264 +290,6 @@ fn parseIndexBuffer(
     const way_lookup = WayLookup{ .ways = try ways.toOwnedSlice() };
     return .{ way_lookup, way_buckets, node_adjacency_map };
 }
-
-const NormalizedPosition = Point;
-const NormalizedOffset = Vec;
-
-const MouseTracker = struct {
-    down: bool = false,
-    pos: NormalizedPosition = undefined,
-
-    pub fn onDown(self: *MouseTracker, x: f32, y: f32) void {
-        self.down = true;
-        self.pos.x = x;
-        self.pos.y = y;
-    }
-
-    pub fn onUp(self: *MouseTracker) void {
-        self.down = false;
-    }
-
-    pub fn getMovement(self: *MouseTracker, x: f32, y: f32) NormalizedOffset {
-        return .{
-            .x = self.pos.x - x,
-            .y = y - self.pos.y,
-        };
-    }
-};
-
-const FloatUniform = struct {
-    loc: i32,
-
-    fn init(program: i32, key: []const u8) FloatUniform {
-        const loc = js.glGetUniformLoc(program, key.ptr, key.len);
-        return .{
-            .loc = loc,
-        };
-    }
-
-    fn set(self: *const FloatUniform, val: f32) void {
-        js.glUniform1f(self.loc, val);
-    }
-};
-
-const js = struct {
-    extern fn compileLinkProgram(vs: [*]const u8, vs_len: usize, fs: [*]const u8, fs_len: usize) i32;
-    extern fn glCreateVertexArray() i32;
-    extern fn glCreateBuffer() i32;
-    extern fn glVertexAttribPointer(index: i32, size: i32, type: i32, normalized: bool, stride: i32, offs: i32) void;
-    extern fn glEnableVertexAttribArray(index: i32) void;
-    extern fn glBindBuffer(target: i32, id: i32) void;
-    extern fn glBufferData(target: i32, ptr: [*]const u8, len: usize, usage: i32) void;
-    extern fn glBindVertexArray(vao: i32) void;
-    extern fn glClearColor(r: f32, g: f32, b: f32, a: f32) void;
-    extern fn glClear(mask: i32) void;
-    extern fn glUseProgram(program: i32) void;
-    extern fn glDrawArrays(mode: i32, first: i32, last: i32) void;
-    extern fn glDrawElements(mode: i32, count: i32, type: i32, offs: i32) void;
-    extern fn glGetUniformLoc(program: i32, name: [*]const u8, name_len: usize) i32;
-    extern fn glUniform1f(loc: i32, val: f32) void;
-
-    extern fn clearTags() void;
-    extern fn pushTag(key: [*]const u8, key_len: usize, val: [*]const u8, val_len: usize) void;
-};
-
-const Gl = struct {
-    // https://registry.khronos.org/webgl/specs/latest/1.0/
-    const COLOR_BUFFER_BIT = 0x00004000;
-    const POINTS = 0x0000;
-    const LINE_STRIP = 0x0003;
-    const UNSIGNED_INT = 0x1405;
-    const ARRAY_BUFFER = 0x8892;
-    const ELEMENT_ARRAY_BUFFER = 0x8893;
-    const STATIC_DRAW = 0x88E4;
-    const FLOAT = 0x1406;
-};
-
-const vs_source = @embedFile("vertex.glsl");
-const fs_source = @embedFile("fragment.glsl");
-
-fn uploadMapPoints(data: []const f32) i32 {
-    const vao = js.glCreateVertexArray();
-    js.glBindVertexArray(vao);
-
-    const vbo = js.glCreateBuffer();
-    js.glBindBuffer(Gl.ARRAY_BUFFER, vbo);
-    if (data.len > 0) {
-        js.glBufferData(Gl.ARRAY_BUFFER, @ptrCast(data.ptr), data.len * 4, Gl.STATIC_DRAW);
-    }
-    js.glVertexAttribPointer(0, 2, Gl.FLOAT, false, 0, 0);
-    js.glEnableVertexAttribArray(0);
-    return vao;
-}
-
-fn setupMapIndices(indices: []const u32) i32 {
-    const ebo = js.glCreateBuffer();
-    js.glBindBuffer(Gl.ELEMENT_ARRAY_BUFFER, ebo);
-    js.glBufferData(
-        Gl.ELEMENT_ARRAY_BUFFER,
-        @ptrCast(indices.ptr),
-        indices.len * 4,
-        Gl.STATIC_DRAW,
-    );
-    return ebo;
-}
-
-const BoundRenderer = struct {
-    inner: *Renderer,
-
-    pub fn render(self: *const BoundRenderer, view_state: ViewState) void {
-        js.glBindVertexArray(self.inner.vao);
-        js.glBindBuffer(Gl.ELEMENT_ARRAY_BUFFER, self.inner.ebo);
-
-        js.glClearColor(0.0, 0.0, 0.0, 1.0);
-        js.glClear(Gl.COLOR_BUFFER_BIT);
-
-        self.inner.lat_center.set(view_state.center.y);
-        self.inner.lon_center.set(view_state.center.x);
-        self.inner.aspect.set(view_state.aspect);
-        self.inner.zoom.set(view_state.zoom);
-        self.inner.r.set(1.0);
-        self.inner.g.set(1.0);
-        self.inner.b.set(1.0);
-        js.glDrawElements(Gl.LINE_STRIP, @intCast(self.inner.num_line_segments), Gl.UNSIGNED_INT, 0);
-
-        self.inner.point_size.set(10.0);
-        self.renderCoords(&.{ view_state.center.x, view_state.center.y }, Gl.POINTS);
-    }
-
-    pub fn renderPoints(self: *const BoundRenderer, point_ids: []const NodeId, mode: i32) void {
-        if (point_ids.len == 0) {
-            return;
-        }
-
-        js.glBindVertexArray(self.inner.vao);
-
-        js.glBindBuffer(Gl.ELEMENT_ARRAY_BUFFER, self.inner.custom_ebo);
-        js.glBufferData(
-            Gl.ELEMENT_ARRAY_BUFFER,
-            @ptrCast(point_ids.ptr),
-            point_ids.len * 4,
-            Gl.STATIC_DRAW,
-        );
-        js.glDrawElements(mode, @intCast(point_ids.len), Gl.UNSIGNED_INT, 0);
-    }
-
-    pub fn renderSelectedWay(self: *const BoundRenderer, way: Way) void {
-        js.glBindBuffer(Gl.ELEMENT_ARRAY_BUFFER, self.inner.ebo);
-        const point_ids = way.indexRange(self.inner.index_buffer);
-        js.glBindVertexArray(self.inner.vao);
-        self.inner.r.set(0.0);
-        self.inner.g.set(1.0);
-        self.inner.b.set(1.0);
-        js.glDrawElements(Gl.LINE_STRIP, @intCast(point_ids.end - point_ids.start), Gl.UNSIGNED_INT, @intCast(point_ids.start * 4));
-    }
-
-    pub fn renderCoords(self: *const BoundRenderer, coords: []const f32, mode: i32) void {
-        js.glBindVertexArray(self.inner.custom_vao);
-        js.glBindBuffer(Gl.ELEMENT_ARRAY_BUFFER, self.inner.ebo);
-        js.glBufferData(Gl.ARRAY_BUFFER, @ptrCast(coords.ptr), @intCast(coords.len * 4), Gl.STATIC_DRAW);
-        js.glDrawArrays(mode, 0, @intCast(coords.len / 2));
-    }
-};
-
-const Renderer = struct {
-    index_buffer: []const u32,
-    program: i32,
-    vao: i32,
-    custom_vao: i32,
-    ebo: i32,
-    custom_ebo: i32,
-    lat_center: FloatUniform,
-    lon_center: FloatUniform,
-    aspect: FloatUniform,
-    zoom: FloatUniform,
-    r: FloatUniform,
-    g: FloatUniform,
-    b: FloatUniform,
-    point_size: FloatUniform,
-    num_line_segments: usize,
-
-    pub fn init(point_data: []const f32, index_data: []const u32) Renderer {
-        // Now create an array of positions for the square.
-        const program = js.compileLinkProgram(vs_source, vs_source.len, fs_source, fs_source.len);
-
-        const vao = uploadMapPoints(point_data);
-        const custom_vao = uploadMapPoints(&.{});
-
-        const lat_center = FloatUniform.init(program, "lat_center");
-
-        const lon_center = FloatUniform.init(program, "lon_center");
-
-        const zoom = FloatUniform.init(program, "zoom");
-
-        const aspect = FloatUniform.init(program, "aspect");
-        const r = FloatUniform.init(program, "r");
-        const g = FloatUniform.init(program, "g");
-        const b = FloatUniform.init(program, "b");
-        const point_size = FloatUniform.init(program, "point_size");
-
-        const ebo = setupMapIndices(index_data);
-
-        const custom_ebo = js.glCreateBuffer();
-
-        return .{
-            .index_buffer = index_data,
-            .program = program,
-            .vao = vao,
-            .custom_vao = custom_vao,
-            .ebo = ebo,
-            .custom_ebo = custom_ebo,
-            .lat_center = lat_center,
-            .lon_center = lon_center,
-            .aspect = aspect,
-            .zoom = zoom,
-            .point_size = point_size,
-            .r = r,
-            .g = g,
-            .b = b,
-            .num_line_segments = index_data.len,
-        };
-    }
-
-    pub fn bind(self: *Renderer) BoundRenderer {
-        js.glBindVertexArray(self.vao);
-        js.glBindBuffer(Gl.ELEMENT_ARRAY_BUFFER, self.ebo);
-        js.glUseProgram(self.program);
-        return .{
-            .inner = self,
-        };
-    }
-};
-
-const IndexBufferIt = struct {
-    data: []const u32,
-    i: usize,
-
-    fn init(data: []const u32) IndexBufferIt {
-        return .{
-            .data = data,
-            .i = 0,
-        };
-    }
-
-    fn next(self: *IndexBufferIt) ?IndexRange {
-        self.i += 1;
-        if (self.i >= self.data.len) {
-            return null;
-        }
-
-        const start = self.i;
-        const slice_rel_start: []const u32 = self.data[self.i..];
-        const end_rel_start = std.mem.indexOfScalar(u32, slice_rel_start, 0xffffffff);
-        const end = if (end_rel_start) |v| start + v else self.data.len;
-        self.i = end;
-        return .{
-            .start = start,
-            .end = end,
-        };
-    }
-};
 
 const ClosestWayCalculator = struct {
     // Static external references
