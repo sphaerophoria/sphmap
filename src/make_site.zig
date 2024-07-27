@@ -67,7 +67,7 @@ const MapDataWriter = struct {
 
         self.node_id_idx_map.put(node_id, self.node_id_idx_map.count()) catch return;
 
-        std.debug.assert(builtin.cpu.arch.endian() == .little);
+        comptime std.debug.assert(builtin.cpu.arch.endian() == .little);
         self.writer.writeAll(std.mem.asBytes(&lon)) catch unreachable;
         self.writer.writeAll(std.mem.asBytes(&lat)) catch unreachable;
     }
