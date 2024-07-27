@@ -121,6 +121,7 @@ pub fn deinit(self: *App) void {
     self.way_buckets.deinit();
     self.string_table.deinit(self.alloc);
     self.monitored_attributes.deinit();
+    self.alloc.free(self.textures);
     self.alloc.destroy(self);
 }
 
@@ -189,7 +190,7 @@ pub fn onMouseMove(self: *App, x: f32, y: f32) !void {
         }
     }
 
-    if (calc.min_way.value < self.ways.ways.len) {
+    if (calc.min_dist != std.math.inf(f32)) {
         bound_renderer.inner.r.set(0.0);
         bound_renderer.inner.g.set(1.0);
         bound_renderer.inner.b.set(1.0);
@@ -391,7 +392,7 @@ const ClosestWayCalculator = struct {
             .way_idx = 0,
             .points = points,
             .segment_idx = 0,
-            .min_dist = std.math.floatMax(f32),
+            .min_dist = std.math.inf(f32),
             .min_dist_loc = undefined,
             .min_way = undefined,
             .min_way_segment = undefined,

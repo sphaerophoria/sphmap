@@ -2,7 +2,7 @@ with import <nixpkgs> {};
 
 let
   unstable = import
-    (builtins.fetchTarball "https://github.com/NixOS/nixpkgs/archive/55fcb63b2c3c245f5f9d1aafa68671c4d6304881.tar.gz")
+    (builtins.fetchTarball "https://github.com/NixOS/nixpkgs/archive/8001cc402f61b8fd6516913a57ec94382455f5e5.tar.gz")
     # reuse the current configuration
     { config = config; };
 in
@@ -20,6 +20,11 @@ pkgs.mkShell {
     nodePackages.prettier
     nodePackages.jshint
     linuxPackages_latest.perf
+    glfw
+    wayland
+    pkg-config
   ];
+
+  LD_LIBRARY_PATH = "${wayland}/lib";
 }
 

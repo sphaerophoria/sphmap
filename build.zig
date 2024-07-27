@@ -45,15 +45,6 @@ const Builder = struct {
         _ = self.installAndCheck(exe);
     }
 
-    fn makeGuiLib(self: *Builder) *std.Build.Step.Compile {
-        return self.b.addStaticLibrary(.{
-            .name = "gui",
-            .root_source_file = self.b.path("src/gui.zig"),
-            .target = self.target,
-            .optimize = self.opt,
-        });
-    }
-
     fn buildApp(self: *Builder) void {
         const wasm = self.b.addExecutable(.{
             .name = "index",
@@ -67,14 +58,47 @@ const Builder = struct {
         self.wasm_step.dependOn(&installed.step);
     }
 
-    fn buildLocalApp(self: *Builder, libgui: *std.Build.Step.Compile) void {
+    fn buildLinterApp(self: *Builder) void {
         const exe = self.b.addExecutable(.{
-            .name = "sphmap",
-            .root_source_file = self.b.path("src/local.zig"),
+            .name = "sphmap_nogui",
+            .root_source_file = self.b.path("src/native_nogui.zig"),
             .target = self.target,
             .optimize = self.opt,
         });
-        exe.linkLibrary(libgui);
+        _ = self.installAndCheck(exe);
+    }
+
+    fn buildLocalApp(self: *Builder) void {
+        const exe = self.b.addExecutable(.{
+            .name = "sphmap",
+            .root_source_file = self.b.path("src/native_glfw.zig"),
+            .target = self.target,
+            .optimize = self.opt,
+        });
+        exe.addCSourceFiles(.{
+            .files = &.{
+                "cimgui/cimgui.cpp",
+                "cimgui/imgui/imgui.cpp",
+                "cimgui/imgui/imgui_draw.cpp",
+                "cimgui/imgui/imgui_demo.cpp",
+                "cimgui/imgui/imgui_tables.cpp",
+                "cimgui/imgui/imgui_widgets.cpp",
+                "cimgui/imgui/backends/imgui_impl_glfw.cpp",
+                "cimgui/imgui/backends/imgui_impl_opengl3.cpp",
+                "glad/src/glad.c",
+                "src/stb_image.c",
+            },
+        });
+        exe.addIncludePath(self.b.path("cimgui"));
+        exe.addIncludePath(self.b.path("cimgui/generator/output"));
+        exe.addIncludePath(self.b.path("cimgui/imgui/backends"));
+        exe.addIncludePath(self.b.path("cimgui/imgui"));
+        exe.addIncludePath(self.b.path("stb_image"));
+        exe.addIncludePath(self.b.path("glad/include"));
+        exe.defineCMacro("IMGUI_IMPL_API", "extern \"C\"");
+        exe.linkSystemLibrary("glfw");
+        exe.linkLibC();
+        exe.linkLibCpp();
         _ = self.installAndCheck(exe);
     }
 
@@ -91,9 +115,9 @@ const Builder = struct {
 
 pub fn build(b: *std.Build) void {
     var builder = Builder.init(b);
-    const gui_lib = builder.makeGuiLib();
     builder.generateMapData();
     builder.buildApp();
-    builder.buildLocalApp(gui_lib);
     builder.buildPathPlannerBenchmark();
+    builder.buildLinterApp();
+    builder.buildLocalApp();
 }
