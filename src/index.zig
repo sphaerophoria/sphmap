@@ -28,6 +28,14 @@ fn print(comptime fmt: []const u8, args: anytype) void {
     logWasm(slice.ptr, slice.len);
 }
 
+pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, ret_addr: ?usize) noreturn {
+    _ = ret_addr;
+    _ = error_return_trace;
+    logWasm(msg.ptr, msg.len);
+    asm volatile ("unreachable");
+    unreachable;
+}
+
 pub export var global_chunk: [16384]u8 = undefined;
 
 pub export fn pushMapData(len: usize) void {
