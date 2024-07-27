@@ -26,8 +26,8 @@ const WayCache = struct {
         self.tags.deinit();
     }
 
-    fn pushNode(self: *WayCache, node_id: i64) void {
-        self.nodes.append(node_id) catch unreachable;
+    fn pushNode(self: *WayCache, node_id: i64) !void {
+        try self.nodes.append(node_id);
     }
 
     fn pushTag(self: *WayCache, k: []const u8, v: []const u8) !void {
@@ -64,7 +64,7 @@ const MapDataWriter = struct {
         self.node_id_idx_map.deinit();
     }
 
-    fn pushNode(self: *MapDataWriter, node_id: i64, lon: f32, lat: f32) void {
+    fn pushNode(self: *MapDataWriter, node_id: i64, lon: f32, lat: f32) !void {
         self.max_lon = @max(lon, self.max_lon);
         self.min_lon = @min(lon, self.min_lon);
         self.max_lat = @max(lat, self.max_lat);
@@ -73,15 +73,15 @@ const MapDataWriter = struct {
         self.node_id_idx_map.put(node_id, self.node_id_idx_map.count()) catch return;
 
         comptime std.debug.assert(builtin.cpu.arch.endian() == .little);
-        self.writer.writeAll(std.mem.asBytes(&lon)) catch unreachable;
-        self.writer.writeAll(std.mem.asBytes(&lat)) catch unreachable;
+        try self.writer.writeAll(std.mem.asBytes(&lon));
+        try self.writer.writeAll(std.mem.asBytes(&lat));
     }
 
-    fn pushWayNodes(self: *MapDataWriter, nodes: []const i64) void {
-        self.writer.writeInt(u32, 0xffffffff, .little) catch unreachable;
+    fn pushWayNodes(self: *MapDataWriter, nodes: []const i64) !void {
+        try self.writer.writeInt(u32, 0xffffffff, .little);
         for (nodes) |node_id| {
-            const node_idx = self.node_id_idx_map.get(node_id) orelse unreachable;
-            self.writer.writeInt(u32, @intCast(node_idx), .little) catch unreachable;
+            const node_idx = self.node_id_idx_map.get(node_id) orelse return error.NoNode;
+            try self.writer.writeInt(u32, @intCast(node_idx), .little);
         }
     }
 
@@ -119,10 +119,10 @@ const StringTable = struct {
         self.string_table_data.deinit();
     }
 
-    fn pushOrFree(self: *StringTable, s: []const u8) usize {
-        const res = self.string_table.getOrPut(s) catch unreachable;
+    fn pushOrFree(self: *StringTable, s: []const u8) !usize {
+        const res = try self.string_table.getOrPut(s);
         if (!res.found_existing) {
-            self.string_table_data.append(s) catch unreachable;
+            try self.string_table_data.append(s);
             res.value_ptr.* = self.string_table_data.items.len - 1;
         } else {
             self.alloc.free(s);
@@ -194,7 +194,7 @@ fn findAttributeVal(key: []const u8, attrs: *XmlParser.XmlAttrIter) ?[]const u8 
     return null;
 }
 
-fn startElement(ctx: ?*anyopaque, name: []const u8, attrs: *XmlParser.XmlAttrIter) void {
+fn startElement(ctx: ?*anyopaque, name: []const u8, attrs: *XmlParser.XmlAttrIter) anyerror!void {
     const user_data: *Userdata = @ptrCast(@alignCast(ctx));
 
     if (std.mem.eql(u8, name, "node")) {
@@ -205,9 +205,9 @@ fn startElement(ctx: ?*anyopaque, name: []const u8, attrs: *XmlParser.XmlAttrIte
         user_data.way_cache.reset();
     } else if (std.mem.eql(u8, name, "nd")) {
         if (user_data.in_way) {
-            const node_id_s = findAttributeVal("ref", attrs) orelse return;
-            const node_id = std.fmt.parseInt(i64, node_id_s, 10) catch unreachable;
-            user_data.way_cache.pushNode(node_id);
+            const node_id_s = findAttributeVal("ref", attrs) orelse return error.NoRef;
+            const node_id = try std.fmt.parseInt(i64, node_id_s, 10);
+            try user_data.way_cache.pushNode(node_id);
         }
     } else if (std.mem.eql(u8, name, "tag")) {
         if (user_data.in_way) {
@@ -221,48 +221,48 @@ fn startElement(ctx: ?*anyopaque, name: []const u8, attrs: *XmlParser.XmlAttrIte
                 }
             }
 
-            const k = k_opt orelse return;
-            const v = v_opt orelse return;
+            const k = k_opt orelse return error.NoTagKey;
+            const v = v_opt orelse return error.NoValKey;
 
-            user_data.way_cache.pushTag(k, v) catch unreachable;
+            try user_data.way_cache.pushTag(k, v);
         }
     }
 }
 
-fn endElement(ctx: ?*anyopaque, name: []const u8) void {
+fn endElement(ctx: ?*anyopaque, name: []const u8) anyerror!void {
     const user_data: *Userdata = @ptrCast(@alignCast(ctx));
     if (std.mem.eql(u8, name, "way")) {
         user_data.in_way = false;
         if (user_data.way_cache.found_highway) {
-            user_data.way_nodes.append(user_data.way_cache.nodes.toOwnedSlice() catch unreachable) catch unreachable;
-            var this_way_tag_keys = user_data.alloc.alloc(usize, user_data.way_cache.tags.items.len) catch unreachable;
-            var this_way_tag_vals = user_data.alloc.alloc(usize, user_data.way_cache.tags.items.len) catch unreachable;
+            try user_data.way_nodes.append(try user_data.way_cache.nodes.toOwnedSlice());
+            var this_way_tag_keys = try user_data.alloc.alloc(usize, user_data.way_cache.tags.items.len);
+            var this_way_tag_vals = try user_data.alloc.alloc(usize, user_data.way_cache.tags.items.len);
 
             for (user_data.way_cache.tags.items, 0..) |tag, i| {
-                const k = user_data.string_table.pushOrFree(tag.key);
-                const v = user_data.string_table.pushOrFree(tag.val);
+                const k = try user_data.string_table.pushOrFree(tag.key);
+                const v = try user_data.string_table.pushOrFree(tag.val);
 
                 this_way_tag_keys[i] = k;
                 this_way_tag_vals[i] = v;
             }
 
-            user_data.way_tags.append(.{
+            try user_data.way_tags.append(.{
                 this_way_tag_keys,
                 this_way_tag_vals,
-            }) catch unreachable;
+            });
             user_data.way_cache.tags.clearRetainingCapacity();
             user_data.way_cache.reset();
         }
     }
 }
 
-fn runParser(xml_path: []const u8, callbacks: XmlParser.Callbacks) !void {
+fn runParser(alloc: Allocator, xml_path: []const u8, callbacks: XmlParser.Callbacks) !void {
     const f = try std.fs.cwd().openFile(xml_path, .{});
     defer f.close();
 
     var buffered_reader = std.io.bufferedReader(f.reader());
 
-    var parser = try XmlParser.init(&callbacks);
+    var parser = try XmlParser.init(alloc, callbacks);
     defer parser.deinit();
 
     while (true) {
@@ -394,7 +394,7 @@ pub fn main() !void {
     };
     defer userdata.deinit();
 
-    try runParser(args.osm_data, .{
+    try runParser(alloc, args.osm_data, .{
         .ctx = &userdata,
         .startElement = startElement,
         .endElement = endElement,
@@ -414,13 +414,13 @@ pub fn main() !void {
             const seen = try seen_node_ids.getOrPut(node_id);
             if (!seen.found_existing) {
                 const node: NodeData = userdata.node_storage.get(node_id) orelse return error.NoNode;
-                data_writer.pushNode(node_id, node.lon, node.lat);
+                try data_writer.pushNode(node_id, node.lon, node.lat);
             }
         }
     }
 
     for (userdata.way_nodes.items) |way_nodes| {
-        data_writer.pushWayNodes(way_nodes);
+        try data_writer.pushWayNodes(way_nodes);
     }
 
     const end_ways = counting_writer.bytes_written;
