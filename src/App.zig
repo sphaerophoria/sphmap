@@ -270,14 +270,11 @@ fn parseIndexBuffer(
     var it = map_data.IndexBufferIt.init(index_buffer);
     var way_id: WayId = .{ .value = 0 };
 
-    var node_neighbors = try alloc.alloc(std.AutoArrayHashMapUnmanaged(NodeId, void), point_lookup.numPoints());
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const tmp_alloc = arena.allocator();
+    var node_neighbors = try tmp_alloc.alloc(std.AutoArrayHashMapUnmanaged(NodeId, void), point_lookup.numPoints());
     @memset(node_neighbors, std.AutoArrayHashMapUnmanaged(NodeId, void){});
-    defer {
-        for (node_neighbors) |*item| {
-            item.deinit(alloc);
-        }
-        alloc.free(node_neighbors);
-    }
 
     while (it.next()) |idx_buf_range| {
         defer way_id.value += 1;
@@ -285,11 +282,11 @@ fn parseIndexBuffer(
         try ways.append(way);
         for (way.node_ids, 0..) |node_id, i| {
             if (i > 0) {
-                try node_neighbors[node_id.value].put(alloc, way.node_ids[i - 1], {});
+                try node_neighbors[node_id.value].put(tmp_alloc, way.node_ids[i - 1], {});
             }
 
             if (i < way.node_ids.len - 1) {
-                try node_neighbors[node_id.value].put(alloc, way.node_ids[i + 1], {});
+                try node_neighbors[node_id.value].put(tmp_alloc, way.node_ids[i + 1], {});
             }
 
             const gps_pos = point_lookup.get(node_id);
