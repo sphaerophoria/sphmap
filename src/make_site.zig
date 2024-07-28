@@ -7,8 +7,8 @@ const Allocator = std.mem.Allocator;
 const NodeIdIdxMap = std.AutoHashMap(i64, usize);
 
 const StringTag = struct {
-    key: []const u8,
-    val: []const u8,
+    key: usize,
+    val: usize,
 };
 
 const WayCache = struct {
@@ -16,13 +16,10 @@ const WayCache = struct {
     found_highway: bool = false,
     tags: std.ArrayList(StringTag),
     nodes: std.ArrayList(i64),
+    last_st_size: usize = 0,
 
     fn deinit(self: *WayCache) void {
         self.nodes.deinit();
-        for (self.tags.items) |tag| {
-            self.alloc.free(tag.key);
-            self.alloc.free(tag.val);
-        }
         self.tags.deinit();
     }
 
@@ -30,23 +27,20 @@ const WayCache = struct {
         try self.nodes.append(node_id);
     }
 
-    fn pushTag(self: *WayCache, k: []const u8, v: []const u8) !void {
+    fn pushTag(self: *WayCache, k: []const u8, v: []const u8, st: *StringTable) !void {
         if (std.mem.eql(u8, k, "highway")) {
             self.found_highway = true;
         }
 
         try self.tags.append(.{
-            .key = try self.alloc.dupe(u8, k),
-            .val = try self.alloc.dupe(u8, v),
+            .key = try st.push(k),
+            .val = try st.push(v),
         });
     }
 
-    fn reset(self: *WayCache) void {
+    fn reset(self: *WayCache, string_table_size: usize) void {
         self.found_highway = false;
-        for (self.tags.items) |tag| {
-            self.alloc.free(tag.key);
-            self.alloc.free(tag.val);
-        }
+        self.last_st_size = string_table_size;
         self.tags.clearRetainingCapacity();
         self.nodes.clearRetainingCapacity();
     }
@@ -99,36 +93,40 @@ const NodeData = struct {
 
 const StringTable = struct {
     alloc: Allocator,
-    string_table: std.StringHashMap(usize),
-    string_table_data: std.ArrayList([]const u8),
+    inner: std.StringArrayHashMapUnmanaged(usize) = .{},
 
     fn init(alloc: Allocator) StringTable {
-        return .{
-            .alloc = alloc,
-            .string_table = std.StringHashMap(usize).init(alloc),
-            .string_table_data = std.ArrayList([]const u8).init(alloc),
-        };
+        return .{ .alloc = alloc };
     }
 
     fn deinit(self: *StringTable) void {
-        for (self.string_table_data.items) |item| {
-            self.alloc.free(item);
+        for (self.inner.keys()) |key| {
+            self.alloc.free(key);
         }
 
-        self.string_table.deinit();
-        self.string_table_data.deinit();
+        self.inner.deinit(self.alloc);
     }
 
-    fn pushOrFree(self: *StringTable, s: []const u8) !usize {
-        const res = try self.string_table.getOrPut(s);
-        if (!res.found_existing) {
-            try self.string_table_data.append(s);
-            res.value_ptr.* = self.string_table_data.items.len - 1;
-        } else {
-            self.alloc.free(s);
+    fn push(self: *StringTable, str: []const u8) !usize {
+        const count_ = self.inner.count();
+        const gop = try self.inner.getOrPut(self.alloc, str);
+        if (!gop.found_existing) {
+            gop.key_ptr.* = try self.alloc.dupe(u8, str);
+            gop.value_ptr.* = count_;
         }
+        return gop.value_ptr.*;
+    }
 
-        return res.value_ptr.*;
+    fn count(self: *const StringTable) usize {
+        return self.inner.count();
+    }
+
+    fn rollback(self: *StringTable, size: usize) void {
+        // clear any extra string table entries we may have added
+        for (self.inner.keys()[size..]) |key| {
+            self.alloc.free(key);
+        }
+        self.inner.shrinkRetainingCapacity(size);
     }
 };
 
@@ -202,7 +200,8 @@ fn startElement(ctx: ?*anyopaque, name: []const u8, attrs: *XmlParser.XmlAttrIte
         return;
     } else if (std.mem.eql(u8, name, "way")) {
         user_data.in_way = true;
-        user_data.way_cache.reset();
+        user_data.string_table.rollback(user_data.way_cache.last_st_size);
+        user_data.way_cache.reset(user_data.string_table.count());
     } else if (std.mem.eql(u8, name, "nd")) {
         if (user_data.in_way) {
             const node_id_s = findAttributeVal("ref", attrs) orelse return error.NoRef;
@@ -224,7 +223,7 @@ fn startElement(ctx: ?*anyopaque, name: []const u8, attrs: *XmlParser.XmlAttrIte
             const k = k_opt orelse return error.NoTagKey;
             const v = v_opt orelse return error.NoValKey;
 
-            try user_data.way_cache.pushTag(k, v);
+            try user_data.way_cache.pushTag(k, v, &user_data.string_table);
         }
     }
 }
@@ -239,19 +238,18 @@ fn endElement(ctx: ?*anyopaque, name: []const u8) anyerror!void {
             var this_way_tag_vals = try user_data.alloc.alloc(usize, user_data.way_cache.tags.items.len);
 
             for (user_data.way_cache.tags.items, 0..) |tag, i| {
-                const k = try user_data.string_table.pushOrFree(tag.key);
-                const v = try user_data.string_table.pushOrFree(tag.val);
-
-                this_way_tag_keys[i] = k;
-                this_way_tag_vals[i] = v;
+                this_way_tag_keys[i] = tag.key;
+                this_way_tag_vals[i] = tag.val;
             }
 
             try user_data.way_tags.append(.{
                 this_way_tag_keys,
                 this_way_tag_vals,
             });
-            user_data.way_cache.tags.clearRetainingCapacity();
-            user_data.way_cache.reset();
+            user_data.way_cache.reset(user_data.string_table.count());
+        } else {
+            user_data.string_table.rollback(user_data.way_cache.last_st_size);
+            user_data.way_cache.reset(user_data.string_table.count());
         }
     }
 }
@@ -425,8 +423,8 @@ pub fn main() !void {
 
     const end_ways = counting_writer.bytes_written;
 
-    for (userdata.string_table.string_table_data.items) |item| {
-        try data_writer.pushStringTableString(item);
+    for (userdata.string_table.inner.keys()) |key| {
+        try data_writer.pushStringTableString(key);
     }
 
     const metadata_out_f = try std.fs.cwd().createFile(metadata_path, .{});
