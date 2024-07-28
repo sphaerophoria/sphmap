@@ -71,6 +71,16 @@ const Builder = struct {
         exe.linkLibrary(libgui);
         self.installAndCheck(exe);
     }
+
+    fn buildPathPlannerBenchmark(self: *Builder) void {
+        const exe = self.b.addExecutable(.{
+            .name = "pp_benchmark",
+            .root_source_file = self.b.path("src/pp_benchmark.zig"),
+            .target = self.target,
+            .optimize = self.opt,
+        });
+        self.installAndCheck(exe);
+    }
 };
 
 pub fn build(b: *std.Build) void {
@@ -79,4 +89,5 @@ pub fn build(b: *std.Build) void {
     builder.generateMapData();
     builder.buildApp();
     builder.buildLocalApp(gui_lib);
+    builder.buildPathPlannerBenchmark();
 }

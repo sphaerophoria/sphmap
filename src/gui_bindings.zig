@@ -16,3 +16,4 @@ pub extern fn glUniform1f(loc: i32, val: f32) void;
 
 pub extern fn clearTags() void;
 pub extern fn pushTag(key: [*]const u8, key_len: usize, val: [*]const u8, val_len: usize) void;
+pub extern fn setNodeId(id: usize) void;

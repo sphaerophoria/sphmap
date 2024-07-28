@@ -1,4 +1,5 @@
 const std = @import("std");
+const Metadata = @import("Metadata.zig");
 const Allocator = std.mem.Allocator;
 const lin = @import("lin.zig");
 const MapPos = lin.Point;
@@ -170,5 +171,45 @@ pub const StringTable = struct {
 
     pub fn get(self: *const StringTable, id: StringTableId) []const u8 {
         return self.data[id];
+    }
+};
+
+pub const MeterMetadata = struct {
+    width: f32,
+    height: f32,
+};
+
+pub fn latLongToMeters(point_data: []f32, metadata: Metadata) MeterMetadata {
+    const center_lat = (metadata.min_lat + metadata.max_lat) / 2.0;
+    const center_lon = (metadata.min_lon + metadata.max_lon) / 2.0;
+
+    const lat_step = 111132.92 - 559.82 * @cos(2 * center_lat) + 1.175 * @cos(4 * center_lat) - 0.0023 * @cos(6 * center_lat);
+    const lon_step = 111412.84 * @cos(center_lon) - 93.5 * @cos(3 * center_lon) + 0.118 * @cos(5 * center_lon);
+
+    for (0..point_data.len / 2) |i| {
+        const lon = &point_data[i * 2];
+        const lat = &point_data[i * 2 + 1];
+
+        lat.* = lat_step * (metadata.max_lat - lat.*);
+        lon.* = lon_step * (lon.* - metadata.min_lon);
+    }
+
+    return .{
+        .width = lon_step * (metadata.max_lon - metadata.min_lon),
+        .height = lat_step * (metadata.max_lat - metadata.min_lat),
+    };
+}
+
+pub const MapDataComponents = struct {
+    point_data: []f32,
+    index_data: []const u32,
+    string_table_data: []const u8,
+
+    pub fn init(data: []u8, metadata: Metadata) MapDataComponents {
+        return .{
+            .point_data = @alignCast(std.mem.bytesAsSlice(f32, data[0..@intCast(metadata.end_nodes)])),
+            .index_data = @alignCast(std.mem.bytesAsSlice(u32, data[@intCast(metadata.end_nodes)..@intCast(metadata.end_ways)])),
+            .string_table_data = data[@intCast(metadata.end_ways)..],
+        };
     }
 };

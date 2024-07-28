@@ -98,3 +98,7 @@ pub export fn pushTag(key: [*]const u8, key_len: usize, val: [*]const u8, val_le
     _ = val;
     _ = val_len;
 }
+
+pub export fn setNodeId(id: usize) void {
+    _ = id;
+}

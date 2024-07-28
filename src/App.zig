@@ -38,43 +38,24 @@ debug_point_neighbors: bool = false,
 debug_path_finding: bool = false,
 
 pub fn init(alloc: Allocator, aspect_val: f32, map_data_buf: []u8, metadata: *const Metadata) !App {
-    const point_data: []f32 = @alignCast(std.mem.bytesAsSlice(f32, map_data_buf[0..@intCast(metadata.end_nodes)]));
+    const split_data = map_data.MapDataComponents.init(map_data_buf, metadata.*);
+    const meter_metdata = map_data.latLongToMeters(split_data.point_data, metadata.*);
 
-    const center_lat = (metadata.min_lat + metadata.max_lat) / 2.0;
-    const center_lon = (metadata.min_lon + metadata.max_lon) / 2.0;
-
-    const lat_step = 111132.92 - 559.82 * @cos(2 * center_lat) + 1.175 * @cos(4 * center_lat) - 0.0023 * @cos(6 * center_lat);
-    const lon_step = 111412.84 * @cos(center_lon) - 93.5 * @cos(3 * center_lon) + 0.118 * @cos(5 * center_lon);
-
-    const height = lat_step * (metadata.max_lat - metadata.min_lat);
-    const width = lon_step * (metadata.max_lon - metadata.min_lon);
-
-    for (0..point_data.len / 2) |i| {
-        const lon = &point_data[i * 2];
-        const lat = &point_data[i * 2 + 1];
-
-        lat.* = lat_step * (metadata.max_lat - lat.*);
-        lon.* = lon_step * (lon.* - metadata.min_lon);
-    }
-
-    const index_data: []const u32 = @alignCast(std.mem.bytesAsSlice(u32, map_data_buf[@intCast(metadata.end_nodes)..@intCast(metadata.end_ways)]));
-
-    const string_table_data: []const u8 = map_data_buf[@intCast(metadata.end_ways)..];
-    var string_table = try StringTable.init(alloc, string_table_data);
+    var string_table = try StringTable.init(alloc, split_data.string_table_data);
     errdefer string_table.deinit(alloc);
 
     const view_state = ViewState{
         .center = .{
-            .x = width / 2.0,
-            .y = height / 2.0,
+            .x = meter_metdata.width / 2.0,
+            .y = meter_metdata.height / 2.0,
         },
-        .zoom = 2.0 / width,
+        .zoom = 2.0 / meter_metdata.width,
         .aspect = aspect_val,
     };
 
-    const point_lookup = PointLookup{ .points = point_data };
+    const point_lookup = PointLookup{ .points = split_data.point_data };
 
-    const index_buffer_objs = try parseIndexBuffer(alloc, point_lookup, width, height, index_data);
+    const index_buffer_objs = try parseIndexBuffer(alloc, point_lookup, meter_metdata.width, meter_metdata.height, split_data.index_data);
     var way_lookup = index_buffer_objs[0];
     errdefer way_lookup.deinit(alloc);
 
@@ -84,7 +65,7 @@ pub fn init(alloc: Allocator, aspect_val: f32, map_data_buf: []u8, metadata: *co
     var adjacency_map = index_buffer_objs[2];
     errdefer adjacency_map.deinit(alloc);
 
-    var renderer = Renderer.init(point_data, index_data);
+    var renderer = Renderer.init(split_data.point_data, split_data.index_data);
     renderer.bind().render(view_state);
 
     return .{
@@ -182,6 +163,7 @@ pub fn onMouseMove(self: *App, x: f32, y: f32) !void {
         }
         const node_id = way.node_ids[calc.min_way_segment];
         self.closest_node = node_id;
+        gui.setNodeId(node_id.value);
 
         const neighbors = self.adjacency_map.getNeighbors(node_id);
         if (self.debug_point_neighbors) {

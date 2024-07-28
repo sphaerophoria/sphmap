@@ -125,6 +125,11 @@ class WasmHandler {
     div.innerHTML = `${ks}: ${vs}`;
     this.tags_div.append(div);
   }
+
+  setNodeId(id) {
+    const div = document.getElementById("node_id");
+    div.innerHTML = "Closest node: " + id;
+  }
 }
 
 function initCanvas() {
@@ -177,6 +182,7 @@ async function instantiateWasmModule(wasm_handlers) {
       glUniform1f: wasm_handlers.glUniform1f.bind(wasm_handlers),
       clearTags: wasm_handlers.clearTags.bind(wasm_handlers),
       pushTag: wasm_handlers.pushTag.bind(wasm_handlers),
+      setNodeId: wasm_handlers.setNodeId.bind(wasm_handlers),
     },
   };
 
