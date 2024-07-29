@@ -101,6 +101,57 @@ class WasmHandler {
     this.gl.uniform1f(this.gl_objects.get(loc), val);
   }
 
+  glUniform2f(loc, a, b) {
+    this.gl.uniform2f(this.gl_objects.get(loc), a, b);
+  }
+
+  glUniform1i(loc, val) {
+    this.gl.uniform1i(this.gl_objects.get(loc), val);
+  }
+
+  glBindTexture(target, texture) {
+    const tex_obj = this.gl_objects.get(texture);
+    this.gl.bindTexture(target, tex_obj);
+  }
+
+  setupTexture(image) {
+    const texture = this.gl.createTexture();
+    this.gl.bindTexture(this.gl.TEXTURE_2D, texture);
+
+    this.gl.texParameteri(
+      this.gl.TEXTURE_2D,
+      this.gl.TEXTURE_WRAP_S,
+      this.gl.REPEAT,
+    );
+    this.gl.texParameteri(
+      this.gl.TEXTURE_2D,
+      this.gl.TEXTURE_WRAP_T,
+      this.gl.REPEAT,
+    );
+    this.gl.texParameteri(
+      this.gl.TEXTURE_2D,
+      this.gl.TEXTURE_MIN_FILTER,
+      this.gl.LINEAR,
+    );
+    this.gl.texParameteri(
+      this.gl.TEXTURE_2D,
+      this.gl.TEXTURE_MAG_FILTER,
+      this.gl.LINEAR,
+    );
+
+    this.gl.texImage2D(
+      this.gl.TEXTURE_2D,
+      0,
+      this.gl.RGBA,
+      this.gl.RGBA,
+      this.gl.UNSIGNED_BYTE,
+      image,
+    );
+    this.gl.generateMipmap(this.gl.TEXTURE_2D);
+
+    return this.gl_objects.push(texture);
+  }
+
   logWasm(s, len) {
     const buf = new Uint8Array(this.memory.buffer, s, len);
     if (len == 0) {
@@ -129,6 +180,18 @@ class WasmHandler {
   setNodeId(id) {
     const div = document.getElementById("node_id");
     div.innerHTML = "Closest node: " + id;
+  }
+
+  fetchTexture(id, p, len) {
+    const url_buf = new Uint8Array(this.memory.buffer, p, len);
+    const url = new TextDecoder("utf8").decode(url_buf);
+    fetch(url)
+      .then((response) => response.blob())
+      .then((blob) => createImageBitmap(blob))
+      .then((image) => {
+        const tex = this.setupTexture(image);
+        this.mod.instance.exports.registerTexture(id, tex);
+      });
   }
 }
 
@@ -169,10 +232,8 @@ async function instantiateWasmModule(wasm_handlers) {
       glBufferData: wasm_handlers.glBufferData.bind(wasm_handlers),
       glCreateVertexArray:
         wasm_handlers.glCreateVertexArray.bind(wasm_handlers),
-      glVertexAttribPointer: (...args) => {
-        console.log(...args);
-        wasm_handlers.gl.vertexAttribPointer(...args);
-      },
+      glVertexAttribPointer: (...args) =>
+        wasm_handlers.gl.vertexAttribPointer(...args),
       glEnableVertexAttribArray: (...args) =>
         wasm_handlers.gl.enableVertexAttribArray(...args),
       glClearColor: (...args) => wasm_handlers.gl.clearColor(...args),
@@ -182,9 +243,14 @@ async function instantiateWasmModule(wasm_handlers) {
       glDrawElements: (...args) => wasm_handlers.gl.drawElements(...args),
       glGetUniformLoc: wasm_handlers.getUniformLocWasm.bind(wasm_handlers),
       glUniform1f: wasm_handlers.glUniform1f.bind(wasm_handlers),
+      glUniform2f: wasm_handlers.glUniform2f.bind(wasm_handlers),
+      glUniform1i: wasm_handlers.glUniform1i.bind(wasm_handlers),
+      glActiveTexture: (...args) => wasm_handlers.gl.activeTexture(...args),
+      glBindTexture: wasm_handlers.glBindTexture.bind(wasm_handlers),
       clearTags: wasm_handlers.clearTags.bind(wasm_handlers),
       pushTag: wasm_handlers.pushTag.bind(wasm_handlers),
       setNodeId: wasm_handlers.setNodeId.bind(wasm_handlers),
+      fetchTexture: wasm_handlers.fetchTexture.bind(wasm_handlers),
     },
   };
 
@@ -193,6 +259,7 @@ async function instantiateWasmModule(wasm_handlers) {
     wasmEnv,
   );
   wasm_handlers.memory = mod.instance.exports.memory;
+  wasm_handlers.mod = mod;
 
   return mod;
 }
@@ -230,6 +297,14 @@ async function loadMetadata(mod) {
     "map_data.json",
     mod,
     mod.instance.exports.pushMetadata,
+  );
+}
+
+async function loadImageTileMetadata(mod) {
+  await loadDataFromServer(
+    "image_tile_data.json",
+    mod,
+    mod.instance.exports.pushImageTileData,
   );
 }
 
@@ -311,6 +386,7 @@ async function init() {
   const mod = await instantiateWasmModule(wasm_handlers);
   await loadPointsData(mod);
   await loadMetadata(mod);
+  await loadImageTileMetadata(mod);
 
   mod.instance.exports.init(canvasAspect(canvas));
   mod.instance.exports.render();

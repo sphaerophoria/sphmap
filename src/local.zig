@@ -27,7 +27,7 @@ pub fn main() !void {
     const parsed = try std.json.parseFromSlice(Metadata, alloc, map_metadata, .{});
     defer parsed.deinit();
 
-    var app = try App.init(alloc, 1.0, map_data, &parsed.value);
+    var app = try App.init(alloc, 1.0, map_data, &parsed.value, &.{});
     defer app.deinit();
 
     app.onMouseDown(0.5, 0.5);

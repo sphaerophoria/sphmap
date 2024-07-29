@@ -90,6 +90,26 @@ pub export fn glUniform1f(loc: i32, val: f32) void {
     _ = val;
 }
 
+pub export fn glUniform2f(loc: i32, a: f32, b: f32) void {
+    _ = loc;
+    _ = a;
+    _ = b;
+}
+
+pub export fn glUniform1i(loc: i32, val: i32) void {
+    _ = loc;
+    _ = val;
+}
+
+pub export fn glActiveTexture(val: i32) void {
+    _ = val;
+}
+
+pub export fn glBindTexture(target: i32, val: i32) void {
+    _ = target;
+    _ = val;
+}
+
 pub export fn clearTags() void {}
 
 pub export fn pushTag(key: [*]const u8, key_len: usize, val: [*]const u8, val_len: usize) void {
@@ -101,4 +121,10 @@ pub export fn pushTag(key: [*]const u8, key_len: usize, val: [*]const u8, val_le
 
 pub export fn setNodeId(id: usize) void {
     _ = id;
+}
+
+pub export fn fetchTexture(id: usize, url: [*]const u8, len: usize) void {
+    _ = id;
+    _ = url;
+    _ = len;
 }

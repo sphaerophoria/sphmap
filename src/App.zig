@@ -6,6 +6,11 @@ const map_data = @import("map_data.zig");
 const lin = @import("lin.zig");
 const PathPlanner = @import("PathPlanner.zig");
 const Renderer = @import("Renderer.zig");
+const TextureRenderer = @import("TextureRenderer.zig");
+const gl_utils = @import("gl_utils.zig");
+const Gl = gl_utils.Gl;
+const image_tile_data = @import("image_tile_data.zig");
+const ImageTileData = image_tile_data.ImageTileData;
 const Point = lin.Point;
 const Vec = lin.Vec;
 const MapPos = lin.Point;
@@ -24,7 +29,9 @@ const App = @This();
 alloc: Allocator,
 mouse_tracker: MouseTracker = .{},
 metadata: *const Metadata,
+image_tile_metadata: ImageTileData,
 renderer: Renderer,
+texture_renderer: TextureRenderer,
 view_state: ViewState,
 points: PointLookup,
 ways: WayLookup,
@@ -34,13 +41,22 @@ way_buckets: WayBuckets,
 path_start: ?NodeId = null,
 closest_node: NodeId = NodeId{ .value = 0 },
 turning_cost: f32 = 0.0,
+textures: []i32,
 debug_way_finding: bool = false,
 debug_point_neighbors: bool = false,
 debug_path_finding: bool = false,
 
-pub fn init(alloc: Allocator, aspect_val: f32, map_data_buf: []u8, metadata: *const Metadata) !App {
+pub fn init(alloc: Allocator, aspect_val: f32, map_data_buf: []u8, metadata: *const Metadata, image_tile_metadata: ImageTileData) !App {
     const split_data = map_data.MapDataComponents.init(map_data_buf, metadata.*);
     const meter_metdata = map_data.latLongToMeters(split_data.point_data, metadata.*);
+
+    const textures = try alloc.alloc(i32, image_tile_metadata.len);
+    errdefer alloc.free(textures);
+    @memset(textures, -1);
+
+    for (0..image_tile_metadata.len) |i| {
+        gui.fetchTexture(i, image_tile_metadata[i].path.ptr, image_tile_metadata[i].path.len);
+    }
 
     var string_table = try StringTable.init(alloc, split_data.string_table_data);
     errdefer string_table.deinit(alloc);
@@ -69,16 +85,21 @@ pub fn init(alloc: Allocator, aspect_val: f32, map_data_buf: []u8, metadata: *co
     var renderer = Renderer.init(split_data.point_data, split_data.index_data);
     renderer.bind().render(view_state);
 
+    const texture_renderer = TextureRenderer.init();
+
     return .{
         .alloc = alloc,
         .adjacency_map = adjacency_map,
+        .image_tile_metadata = image_tile_metadata,
         .renderer = renderer,
+        .texture_renderer = texture_renderer,
         .metadata = metadata,
         .view_state = view_state,
         .points = point_lookup,
         .ways = way_lookup,
         .way_buckets = way_buckets,
         .string_table = string_table,
+        .textures = textures,
     };
 }
 
@@ -121,8 +142,9 @@ pub fn onMouseMove(self: *App, x: f32, y: f32) !void {
         self.view_state.center.x,
     );
 
+    self.render();
+
     const bound_renderer = self.renderer.bind();
-    bound_renderer.render(self.view_state);
 
     var calc = ClosestWayCalculator.init(
         self.view_state.center,
@@ -137,7 +159,7 @@ pub fn onMouseMove(self: *App, x: f32, y: f32) !void {
         bound_renderer.inner.b.set(1.0);
         while (calc.step()) |debug| {
             bound_renderer.inner.point_size.set(std.math.pow(f32, std.math.e, -debug.dist * 0.05) * 50.0);
-            bound_renderer.renderCoords(&.{ debug.dist_loc.x, debug.dist_loc.y }, Renderer.Gl.POINTS);
+            bound_renderer.renderCoords(&.{ debug.dist_loc.x, debug.dist_loc.y }, Gl.POINTS);
         }
     } else {
         while (calc.step()) |_| {}
@@ -169,17 +191,17 @@ pub fn onMouseMove(self: *App, x: f32, y: f32) !void {
         const neighbors = self.adjacency_map.getNeighbors(node_id);
         if (self.debug_point_neighbors) {
             bound_renderer.inner.point_size.set(10.0);
-            bound_renderer.renderPoints(neighbors, Renderer.Gl.POINTS);
+            bound_renderer.renderPoints(neighbors, Gl.POINTS);
         }
         bound_renderer.renderSelectedWay(self.ways.get(calc.min_way));
         if (self.debug_way_finding) {
-            bound_renderer.renderCoords(&.{ self.view_state.center.x, self.view_state.center.y, calc.min_dist_loc.x, calc.min_dist_loc.y }, Renderer.Gl.LINE_STRIP);
+            bound_renderer.renderCoords(&.{ self.view_state.center.x, self.view_state.center.y, calc.min_dist_loc.x, calc.min_dist_loc.y }, Gl.LINE_STRIP);
         }
         bound_renderer.inner.r.set(1.0);
         bound_renderer.inner.g.set(1.0);
         bound_renderer.inner.b.set(1.0);
         bound_renderer.inner.point_size.set(10.0);
-        bound_renderer.renderPoints(&.{node_id}, Renderer.Gl.POINTS);
+        bound_renderer.renderPoints(&.{node_id}, Gl.POINTS);
 
         if (self.path_start) |path_start| {
             var pp = try PathPlanner.init(self.alloc, &self.points, &self.adjacency_map, path_start, node_id, self.turning_cost);
@@ -205,9 +227,9 @@ pub fn onMouseMove(self: *App, x: f32, y: f32) !void {
                 bound_renderer.inner.r.set(1.0);
                 bound_renderer.inner.g.set(0.0);
                 bound_renderer.inner.b.set(0.0);
-                bound_renderer.renderPoints(new_path, Renderer.Gl.LINE_STRIP);
+                bound_renderer.renderPoints(new_path, Gl.LINE_STRIP);
                 if (self.debug_path_finding) {
-                    bound_renderer.renderPoints(seen_gscores.items, Renderer.Gl.POINTS);
+                    bound_renderer.renderPoints(seen_gscores.items, Gl.POINTS);
                 }
             } else |e| {
                 std.log.err("err: {any} {d} {d}", .{ e, path_start.value, node_id.value });
@@ -232,6 +254,19 @@ pub fn zoomOut(self: *App) void {
 }
 
 pub fn render(self: *App) void {
+    gui.glClearColor(0.0, 0.0, 0.0, 1.0);
+    gui.glClear(Gl.COLOR_BUFFER_BIT);
+
+    for (self.textures, 0..) |tex, i| {
+        var bound_texture_renderer = self.texture_renderer.bind();
+        const screen_space = tileLocScreenSpace(self.image_tile_metadata[i], self.view_state, self.metadata.*);
+        bound_texture_renderer.render(
+            tex,
+            screen_space.center,
+            screen_space.scale,
+        );
+    }
+
     const bound_renderer = self.renderer.bind();
     bound_renderer.render(self.view_state);
 }
@@ -242,6 +277,11 @@ pub fn startPath(self: *App) void {
 
 pub fn stopPath(self: *App) void {
     self.path_start = null;
+}
+
+pub fn registerTexture(self: *App, id: usize, tex: i32) !void {
+    self.textures[id] = tex;
+    self.render();
 }
 
 fn parseIndexBuffer(
@@ -433,3 +473,30 @@ const WayBuckets = struct {
         return self.buckets[bucket.value].keys();
     }
 };
+
+const TileLocation = struct {
+    center: Point,
+    scale: Vec,
+};
+
+fn tileLocScreenSpace(item_metadata: image_tile_data.Item, view_state: ViewState, metadata: Metadata) TileLocation {
+    const converter = map_data.CoordinateSpaceConverter.init(&metadata);
+    const x_m = converter.lonToM(item_metadata.center[0]);
+    const y_m = converter.latToM(item_metadata.center[1]);
+    const x_s = (x_m - view_state.center.x) * view_state.zoom;
+    const y_s = (y_m - view_state.center.y) * view_state.zoom * view_state.aspect;
+
+    const w = item_metadata.size[0] / converter.width_deg * converter.widthM() * view_state.zoom / 2;
+    const h = item_metadata.size[1] / converter.height_deg * converter.heightM() * view_state.zoom / 2 * view_state.aspect;
+
+    return .{
+        .center = .{
+            .x = x_s,
+            .y = y_s,
+        },
+        .scale = .{
+            .x = w,
+            .y = h,
+        },
+    };
+}

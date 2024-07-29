@@ -180,25 +180,64 @@ pub const MeterMetadata = struct {
 };
 
 pub fn latLongToMeters(point_data: []f32, metadata: Metadata) MeterMetadata {
-    const center_lat = (metadata.min_lat + metadata.max_lat) / 2.0;
-    const center_lon = (metadata.min_lon + metadata.max_lon) / 2.0;
-
-    const lat_step = 111132.92 - 559.82 * @cos(2 * center_lat) + 1.175 * @cos(4 * center_lat) - 0.0023 * @cos(6 * center_lat);
-    const lon_step = 111412.84 * @cos(center_lon) - 93.5 * @cos(3 * center_lon) + 0.118 * @cos(5 * center_lon);
+    const converter = CoordinateSpaceConverter.init(&metadata);
 
     for (0..point_data.len / 2) |i| {
         const lon = &point_data[i * 2];
         const lat = &point_data[i * 2 + 1];
 
-        lat.* = lat_step * (metadata.max_lat - lat.*);
-        lon.* = lon_step * (lon.* - metadata.min_lon);
+        lat.* = converter.latToM(lat.*);
+        lon.* = converter.lonToM(lon.*);
     }
 
     return .{
-        .width = lon_step * (metadata.max_lon - metadata.min_lon),
-        .height = lat_step * (metadata.max_lat - metadata.min_lat),
+        .width = converter.widthM(),
+        .height = converter.heightM(),
     };
 }
+
+pub const CoordinateSpaceConverter = struct {
+    metadata: *const Metadata,
+    width_deg: f32,
+    height_deg: f32,
+    lat_step: f32,
+    lon_step: f32,
+
+    pub fn init(metadata: *const Metadata) CoordinateSpaceConverter {
+        const center_lat = (metadata.min_lat + metadata.max_lat) / 2.0;
+        const center_lon = (metadata.min_lon + metadata.max_lon) / 2.0;
+
+        const lat_step = 111132.92 - 559.82 * @cos(2 * center_lat) + 1.175 * @cos(4 * center_lat) - 0.0023 * @cos(6 * center_lat);
+        const lon_step = 111412.84 * @cos(center_lon) - 93.5 * @cos(3 * center_lon) + 0.118 * @cos(5 * center_lon);
+
+        const width_deg = metadata.max_lon - metadata.min_lon;
+        const height_deg = metadata.max_lat - metadata.min_lat;
+
+        return .{
+            .metadata = metadata,
+            .lat_step = lat_step,
+            .lon_step = lon_step,
+            .width_deg = width_deg,
+            .height_deg = height_deg,
+        };
+    }
+
+    pub fn latToM(self: *const CoordinateSpaceConverter, lat: f32) f32 {
+        return self.lat_step * (self.metadata.max_lat - lat);
+    }
+
+    pub fn lonToM(self: *const CoordinateSpaceConverter, lon: f32) f32 {
+        return self.lon_step * (lon - self.metadata.min_lon);
+    }
+
+    pub fn widthM(self: *const CoordinateSpaceConverter) f32 {
+        return self.lon_step * self.width_deg;
+    }
+
+    pub fn heightM(self: *const CoordinateSpaceConverter) f32 {
+        return self.lat_step * self.height_deg;
+    }
+};
 
 pub const MapDataComponents = struct {
     point_data: []f32,

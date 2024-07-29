@@ -13,7 +13,13 @@ pub extern fn glDrawArrays(mode: i32, first: i32, last: i32) void;
 pub extern fn glDrawElements(mode: i32, count: i32, type: i32, offs: i32) void;
 pub extern fn glGetUniformLoc(program: i32, name: [*]const u8, name_len: usize) i32;
 pub extern fn glUniform1f(loc: i32, val: f32) void;
+pub extern fn glUniform2f(loc: i32, a: f32, b: f32) void;
+pub extern fn glUniform1i(loc: i32, val: i32) void;
+pub extern fn glActiveTexture(val: i32) void;
+pub extern fn glBindTexture(target: i32, val: i32) void;
 
 pub extern fn clearTags() void;
 pub extern fn pushTag(key: [*]const u8, key_len: usize, val: [*]const u8, val_len: usize) void;
 pub extern fn setNodeId(id: usize) void;
+
+pub extern fn fetchTexture(id: usize, url: [*]const u8, url_len: usize) void;

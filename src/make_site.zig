@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Metadata = @import("Metadata.zig");
 const XmlParser = @import("XmlParser.zig");
+const image_tile_data_mod = @import("image_tile_data.zig");
 const Allocator = std.mem.Allocator;
 
 const NodeIdIdxMap = std.AutoHashMap(i64, usize);
@@ -280,12 +281,14 @@ const Args = struct {
     input_www: []const u8,
     index_wasm: []const u8,
     output: []const u8,
+    image_tile_data: []const u8,
     it: std.process.ArgIterator,
 
     const Option = enum {
         @"--osm-data",
         @"--input-www",
         @"--index-wasm",
+        @"--image-tile-data",
         @"--output",
     };
     fn deinit(self: *Args) void {
@@ -299,6 +302,7 @@ const Args = struct {
         var osm_data_opt: ?[]const u8 = null;
         var input_www_opt: ?[]const u8 = null;
         var index_wasm_opt: ?[]const u8 = null;
+        var image_tile_data: []const u8 = &.{};
         var output_opt: ?[]const u8 = null;
 
         while (it.next()) |arg| {
@@ -311,6 +315,7 @@ const Args = struct {
                 .@"--osm-data" => osm_data_opt = it.next(),
                 .@"--input-www" => input_www_opt = it.next(),
                 .@"--index-wasm" => index_wasm_opt = it.next(),
+                .@"--image-tile-data" => image_tile_data = it.next() orelse @panic("no --image-tile arg"),
                 .@"--output" => output_opt = it.next(),
             }
         }
@@ -319,6 +324,7 @@ const Args = struct {
             .osm_data = osm_data_opt orelse return error.NoOsmData,
             .input_www = input_www_opt orelse return error.NoWww,
             .index_wasm = index_wasm_opt orelse return error.NoWasm,
+            .image_tile_data = image_tile_data,
             .output = output_opt orelse return error.NoOutput,
             .it = it,
         };
@@ -444,4 +450,46 @@ pub fn main() !void {
         alloc.free(way_tags[1]);
     }
     alloc.free(metadata.way_tags);
+
+    const image_tile_data_path = try std.fs.path.join(alloc, &.{ args.output, "image_tile_data.json" });
+    defer alloc.free(image_tile_data_path);
+    if (args.image_tile_data.len == 0) {
+        var image_tile_f = try std.fs.cwd().createFile(image_tile_data_path, .{
+            .truncate = true,
+        });
+        defer image_tile_f.close();
+
+        try image_tile_f.writeAll("[]");
+    } else {
+        const image_tile_f = try std.fs.cwd().openFile(args.image_tile_data, .{});
+        var json_reader = std.json.reader(alloc, image_tile_f.reader());
+        defer json_reader.deinit();
+
+        const image_tile_data = try std.json.parseFromTokenSource(image_tile_data_mod.ImageTileData, alloc, &json_reader, .{});
+        defer image_tile_data.deinit();
+
+        const image_tile_data_dir = std.fs.path.dirname(args.image_tile_data) orelse @panic("no dir");
+        for (image_tile_data.value) |item| {
+            const input_img_path = try std.fs.path.join(alloc, &.{ image_tile_data_dir, item.path });
+            std.debug.print("{s}\n", .{input_img_path});
+            defer alloc.free(input_img_path);
+
+            const output_img_path = try std.fs.path.join(alloc, &.{ args.output, item.path });
+            defer alloc.free(output_img_path);
+
+            const output_img_dir = std.fs.path.dirname(output_img_path) orelse @panic("no dir");
+
+            try std.fs.cwd().makePath(output_img_dir);
+
+            const link_path = try std.fs.path.relative(alloc, output_img_dir, input_img_path);
+            defer alloc.free(link_path);
+            std.fs.cwd().deleteFile(output_img_path) catch {};
+            try std.fs.cwd().symLink(link_path, output_img_path, std.fs.Dir.SymLinkFlags{});
+        }
+
+        std.fs.cwd().deleteFile(image_tile_data_path) catch {};
+        const link_path = try std.fs.path.relative(alloc, args.output, args.image_tile_data);
+        defer alloc.free(link_path);
+        try std.fs.cwd().symLink(link_path, image_tile_data_path, std.fs.Dir.SymLinkFlags{});
+    }
 }

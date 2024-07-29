@@ -1,6 +1,7 @@
 const std = @import("std");
 const Metadata = @import("Metadata.zig");
 const App = @import("App.zig");
+const ImageTileData = @import("image_tile_data.zig").ImageTileData;
 
 pub const std_options = std.Options{
     .logFn = wasmLog,
@@ -46,11 +47,17 @@ pub export fn pushMetadata(len: usize) void {
     global.metadata_buf.appendSlice(global_chunk[0..len]) catch unreachable;
 }
 
+pub export fn pushImageTileData(len: usize) void {
+    global.image_tile_metadata_buf.appendSlice(global_chunk[0..len]) catch unreachable;
+}
+
 const GlobalState = struct {
     app: App = undefined,
     map_data: std.ArrayList(u8) = std.ArrayList(u8).init(std.heap.wasm_allocator),
     metadata_buf: std.ArrayList(u8) = std.ArrayList(u8).init(std.heap.wasm_allocator),
+    image_tile_metadata_buf: std.ArrayList(u8) = std.ArrayList(u8).init(std.heap.wasm_allocator),
     metadata: Metadata = .{},
+    image_tile_metadata: ImageTileData = &.{},
 };
 
 var global = GlobalState{};
@@ -86,7 +93,10 @@ pub export fn init(aspect: f32) void {
     const parsed = std.json.parseFromSlice(Metadata, std.heap.wasm_allocator, global.metadata_buf.items, .{}) catch unreachable;
     global.metadata = parsed.value;
 
-    global.app = App.init(std.heap.wasm_allocator, aspect, global.map_data.items, &global.metadata) catch |e| {
+    const parsed_image_tile = std.json.parseFromSlice(ImageTileData, std.heap.wasm_allocator, global.image_tile_metadata_buf.items, .{}) catch unreachable;
+    global.image_tile_metadata = parsed_image_tile.value;
+
+    global.app = App.init(std.heap.wasm_allocator, aspect, global.map_data.items, &global.metadata, global.image_tile_metadata) catch |e| {
         std.log.err("app init failed: {any}", .{e});
         return;
     };
@@ -121,4 +131,10 @@ pub export fn stopPath() void {
 
 pub export fn setTurningCost(cost: f32) void {
     global.app.turning_cost = cost;
+}
+
+pub export fn registerTexture(id: usize, tex: i32) void {
+    global.app.registerTexture(id, tex) catch |e| {
+        std.log.err("Failed to register texture: {any}", .{e});
+    };
 }

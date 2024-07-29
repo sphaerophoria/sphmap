@@ -1,5 +1,9 @@
+const std = @import("std");
 const gui = @import("gui_bindings.zig");
 const lin = @import("lin.zig");
+const gl_utils = @import("gl_utils.zig");
+const FloatUniform = gl_utils.FloatUniform;
+const Gl = gl_utils.Gl;
 const map_data = @import("map_data.zig");
 const MapPos = lin.Point;
 const NodeId = map_data.NodeId;
@@ -80,33 +84,6 @@ pub const ViewState = struct {
     aspect: f32,
 };
 
-const FloatUniform = struct {
-    loc: i32,
-
-    pub fn init(program: i32, key: []const u8) FloatUniform {
-        const loc = gui.glGetUniformLoc(program, key.ptr, key.len);
-        return .{
-            .loc = loc,
-        };
-    }
-
-    pub fn set(self: *const FloatUniform, val: f32) void {
-        gui.glUniform1f(self.loc, val);
-    }
-};
-
-pub const Gl = struct {
-    // https://registry.khronos.org/webgl/specs/latest/1.0/
-    pub const COLOR_BUFFER_BIT = 0x00004000;
-    pub const POINTS = 0x0000;
-    pub const LINE_STRIP = 0x0003;
-    pub const UNSIGNED_INT = 0x1405;
-    pub const ARRAY_BUFFER = 0x8892;
-    pub const ELEMENT_ARRAY_BUFFER = 0x8893;
-    pub const STATIC_DRAW = 0x88E4;
-    pub const FLOAT = 0x1406;
-};
-
 const vs_source = @embedFile("vertex.glsl");
 const fs_source = @embedFile("fragment.glsl");
 
@@ -142,9 +119,6 @@ const BoundRenderer = struct {
     pub fn render(self: *const BoundRenderer, view_state: ViewState) void {
         gui.glBindVertexArray(self.inner.vao);
         gui.glBindBuffer(Gl.ELEMENT_ARRAY_BUFFER, self.inner.ebo);
-
-        gui.glClearColor(0.0, 0.0, 0.0, 1.0);
-        gui.glClear(Gl.COLOR_BUFFER_BIT);
 
         self.inner.lat_center.set(view_state.center.y);
         self.inner.lon_center.set(view_state.center.x);
