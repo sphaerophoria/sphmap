@@ -134,8 +134,10 @@ class WasmHandler {
 
 function initCanvas() {
   const canvas = document.getElementById("canvas");
-  canvas.width = canvas.clientWidth;
-  canvas.height = canvas.clientHeight;
+  canvas.width = canvas.clientWidth / 2.0;
+  canvas.height = canvas.clientHeight / 2.0;
+  const ctx = canvas.getContext("webgl2");
+  ctx.viewport(0, 0, canvas.width, canvas.height);
   return canvas;
 }
 
@@ -276,8 +278,8 @@ class CanvasInputHandler {
   }
 
   onResize() {
-    this.canvas.width = canvas.clientWidth;
-    this.canvas.height = canvas.clientHeight;
+    this.canvas.width = canvas.clientWidth / 2.0;
+    this.canvas.height = canvas.clientHeight / 2.0;
     this.gl.viewport(0, 0, canvas.width, canvas.height);
     this.mod.instance.exports.setAspect(canvasAspect(this.canvas));
   }
