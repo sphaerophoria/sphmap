@@ -6,9 +6,11 @@ const Builder = struct {
     target: std.Build.ResolvedTarget,
     wasm_target: std.Build.ResolvedTarget,
     check_step: *std.Build.Step,
+    wasm_step: *std.Build.Step,
 
     fn init(b: *std.Build) Builder {
         const check_step = b.step("check", "check");
+        const wasm_step = b.step("wasm", "wasm");
         return .{
             .b = b,
             .opt = b.standardOptimizeOption(.{}),
@@ -17,14 +19,18 @@ const Builder = struct {
                 .{ .arch_os_abi = "wasm32-freestanding" },
             ) catch unreachable),
             .check_step = check_step,
+            .wasm_step = wasm_step,
         };
     }
 
-    fn installAndCheck(self: *Builder, elem: *std.Build.Step.Compile) void {
+    fn installAndCheck(self: *Builder, elem: *std.Build.Step.Compile) *std.Build.Step.InstallArtifact {
         const duped = self.b.allocator.create(std.Build.Step.Compile) catch unreachable;
         duped.* = elem.*;
         self.b.installArtifact(elem);
+        const install_artifact = self.b.addInstallArtifact(elem, .{});
+        self.b.getInstallStep().dependOn(&install_artifact.step);
         self.check_step.dependOn(&duped.step);
+        return install_artifact;
     }
 
     fn generateMapData(self: *Builder) void {
@@ -36,7 +42,7 @@ const Builder = struct {
         });
         exe.linkSystemLibrary("expat");
         exe.linkLibC();
-        self.installAndCheck(exe);
+        _ = self.installAndCheck(exe);
     }
 
     fn makeGuiLib(self: *Builder) *std.Build.Step.Compile {
@@ -57,8 +63,8 @@ const Builder = struct {
         });
         wasm.entry = .disabled;
         wasm.rdynamic = true;
-
-        self.installAndCheck(wasm);
+        const installed = self.installAndCheck(wasm);
+        self.wasm_step.dependOn(&installed.step);
     }
 
     fn buildLocalApp(self: *Builder, libgui: *std.Build.Step.Compile) void {
@@ -69,7 +75,7 @@ const Builder = struct {
             .optimize = self.opt,
         });
         exe.linkLibrary(libgui);
-        self.installAndCheck(exe);
+        _ = self.installAndCheck(exe);
     }
 
     fn buildPathPlannerBenchmark(self: *Builder) void {
@@ -79,7 +85,7 @@ const Builder = struct {
             .target = self.target,
             .optimize = self.opt,
         });
-        self.installAndCheck(exe);
+        _ = self.installAndCheck(exe);
     }
 };
 
