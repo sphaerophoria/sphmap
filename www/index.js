@@ -1,22 +1,44 @@
+function colorToRgb(color) {
+  // #rrggbb
+  let it = 1;
+  const colors = [];
+
+  while (it < 7) {
+    const c = color.slice(it, it + 2);
+    console.log(c);
+    colors.push(parseInt(c, 16));
+    it += 2;
+  }
+  return colors;
+}
+
 class ObjectRegistry {
   constructor() {
-    this.objects = [];
+    this.objects = {};
+    this.id = 0;
   }
 
   push(obj) {
-    this.objects.push(obj);
-    return this.objects.length - 1;
+    const id = this.id;
+    this.id += 1;
+    this.objects[id] = obj;
+    return id;
   }
 
   get(id) {
     return this.objects[id];
   }
+
+  remove(id) {
+    delete this.objects[id];
+  }
 }
 
 class WasmHandler {
-  constructor(gl, tags_div) {
+  constructor(gl, tags_div, monitored_div) {
     this.gl = gl;
     this.tags_div = tags_div;
+    this.monitored_div = monitored_div;
     this.gl_objects = new ObjectRegistry();
     this.memory = null;
   }
@@ -70,6 +92,12 @@ class WasmHandler {
 
   glCreateBuffer() {
     return this.gl_objects.push(this.gl.createBuffer());
+  }
+
+  glDeleteBuffer(id) {
+    const obj = this.gl_objects.get(id);
+    this.gl.deleteBuffer(obj);
+    this.gl_objects.remove(id);
   }
 
   glBindBuffer(target, buffer) {
@@ -173,8 +201,66 @@ class WasmHandler {
     const vs = dec.decode(v_buf);
 
     const div = document.createElement("div");
-    div.innerHTML = `${ks}: ${vs}`;
+    div.classList.add("way_tag");
+
+    const label = document.createElement("div");
+    label.innerHTML = `${ks}: ${vs}`;
+    div.appendChild(label);
+    const add = document.createElement("button");
+    add.innerHTML = "Add";
+    add.onclick = () => {
+      this.mod.instance.exports.monitorWayAttribute(k, v);
+    };
+    div.appendChild(add);
+
     this.tags_div.append(div);
+  }
+
+  clearMonitoredAttributes() {
+    this.monitored_div.innerHTML = "";
+  }
+
+  pushMonitoredAttribute(id, k, k_len, v, v_len) {
+    const k_buf = new Uint8Array(this.memory.buffer, k, k_len);
+    const v_buf = new Uint8Array(this.memory.buffer, v, v_len);
+
+    const dec = new TextDecoder("utf8");
+    const ks = dec.decode(k_buf);
+    const vs = dec.decode(v_buf);
+
+    const div = document.createElement("div");
+    div.classList.add("monitored_attribute");
+
+    const label = document.createElement("div");
+    label.innerHTML = `${ks}: ${vs}`;
+    div.appendChild(label);
+
+    const cost = document.createElement("input");
+    cost.type = "number";
+    cost.value = 1.0;
+    cost.onchange = (ev) => {
+      this.mod.instance.exports.setMonitoredCostMultiplier(id, ev.target.value);
+    };
+    div.appendChild(cost);
+
+    const color_picker = document.createElement("input");
+    color_picker.type = "color";
+    color_picker.onchange = (ev) => {
+      console.log(ev.target.value);
+      const rgb = colorToRgb(ev.target.value);
+      console.log(rgb);
+      this.mod.instance.exports.setMonitoredColor(id, rgb[0], rgb[1], rgb[2]);
+    };
+    div.appendChild(color_picker);
+
+    const delete_button = document.createElement("button");
+    delete_button.innerHTML = "Remove";
+    delete_button.onclick = () => {
+      this.mod.instance.exports.removeMonitoredAttribute(id);
+    };
+    div.appendChild(delete_button);
+
+    this.monitored_div.append(div);
   }
 
   setNodeId(id) {
@@ -228,6 +314,7 @@ async function instantiateWasmModule(wasm_handlers) {
       bind2DFloat32Data: wasm_handlers.bind2DFloat32Data.bind(wasm_handlers),
       glBindVertexArray: wasm_handlers.glBindVertexArray.bind(wasm_handlers),
       glCreateBuffer: wasm_handlers.glCreateBuffer.bind(wasm_handlers),
+      glDeleteBuffer: wasm_handlers.glDeleteBuffer.bind(wasm_handlers),
       glBindBuffer: wasm_handlers.glBindBuffer.bind(wasm_handlers),
       glBufferData: wasm_handlers.glBufferData.bind(wasm_handlers),
       glCreateVertexArray:
@@ -249,6 +336,10 @@ async function instantiateWasmModule(wasm_handlers) {
       glBindTexture: wasm_handlers.glBindTexture.bind(wasm_handlers),
       clearTags: wasm_handlers.clearTags.bind(wasm_handlers),
       pushTag: wasm_handlers.pushTag.bind(wasm_handlers),
+      clearMonitoredAttributes:
+        wasm_handlers.clearMonitoredAttributes.bind(wasm_handlers),
+      pushMonitoredAttribute:
+        wasm_handlers.pushMonitoredAttribute.bind(wasm_handlers),
       setNodeId: wasm_handlers.setNodeId.bind(wasm_handlers),
       fetchTexture: wasm_handlers.fetchTexture.bind(wasm_handlers),
     },
@@ -381,8 +472,9 @@ function makeGl(canvas) {
 async function init() {
   const canvas = initCanvas();
   const tags_div = document.getElementById("tags");
+  const monitored_div = document.getElementById("monitored");
   const gl = makeGl(canvas);
-  const wasm_handlers = new WasmHandler(gl, tags_div);
+  const wasm_handlers = new WasmHandler(gl, tags_div, monitored_div);
   const mod = await instantiateWasmModule(wasm_handlers);
   await loadPointsData(mod);
   await loadMetadata(mod);

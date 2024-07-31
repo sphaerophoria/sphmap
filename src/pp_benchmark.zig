@@ -3,15 +3,37 @@ const App = @import("App.zig");
 const Metadata = @import("Metadata.zig");
 const map_data = @import("map_data.zig");
 const PathPlanner = @import("PathPlanner.zig");
+const monitored_attributes = @import("monitored_attributes.zig");
 const Allocator = std.mem.Allocator;
+const Way = map_data.Way;
+const WayLookup = map_data.WayLookup;
 
 const Args = struct {
+    const AttributeCost = struct {
+        k: []const u8,
+        v: []const u8,
+        cost: f32,
+
+        fn parse(it: *std.process.ArgIterator) !AttributeCost {
+            const k = it.next() orelse return error.NoKey;
+            const v = it.next() orelse return error.NoValue;
+            const cost_s = it.next() orelse return error.NoCost;
+            const cost = try std.fmt.parseFloat(f32, cost_s);
+            return .{
+                .k = k,
+                .v = v,
+                .cost = cost,
+            };
+        }
+    };
+
     start: map_data.NodeId,
     end: map_data.NodeId,
     map_data_bin: []const u8,
     map_data_json: []const u8,
     num_iters: usize,
     turning_cost: f32,
+    attribute_costs: []const AttributeCost,
     it: std.process.ArgIterator,
 
     const Option = enum {
@@ -21,6 +43,7 @@ const Args = struct {
         @"--end-id",
         @"--num-iters",
         @"--turning-cost",
+        @"--attribute-cost",
         @"--help",
     };
 
@@ -35,6 +58,8 @@ const Args = struct {
         var map_data_bin: ?[]const u8 = null;
         var map_data_json: ?[]const u8 = null;
         var turning_cost: ?f32 = null;
+        var attribute_costs = std.ArrayList(AttributeCost).init(alloc);
+        defer attribute_costs.deinit();
         var num_iters: usize = 5;
 
         while (it.next()) |s| {
@@ -84,6 +109,13 @@ const Args = struct {
                         help(process_name);
                     };
                 },
+                .@"--attribute-cost" => {
+                    const attribute_cost = AttributeCost.parse(&it) catch |e| {
+                        std.debug.print("Failed to parse attribute cost args {s}\n", .{@errorName(e)});
+                        help(process_name);
+                    };
+                    try attribute_costs.append(attribute_cost);
+                },
                 .@"--help" => {
                     help(process_name);
                 },
@@ -97,11 +129,13 @@ const Args = struct {
             .map_data_json = unwrapArg(map_data_json, Option.@"--map-data-json", process_name),
             .num_iters = num_iters,
             .turning_cost = unwrapArg(turning_cost, Option.@"--turning-cost", process_name),
+            .attribute_costs = try attribute_costs.toOwnedSlice(),
             .it = it,
         };
     }
 
-    pub fn deinit(self: *Args) void {
+    pub fn deinit(self: *Args, alloc: Allocator) void {
+        alloc.free(self.attribute_costs);
         self.it.deinit();
     }
 
@@ -144,6 +178,9 @@ const Args = struct {
                 .@"--turning-cost" => {
                     std.debug.print("[turning cost]", .{});
                 },
+                .@"--attribute-cost" => {
+                    std.debug.print("[attr_key] [attr_value] [cost]", .{});
+                },
                 .@"--help" => {
                     std.debug.print("Show this help", .{});
                 },
@@ -160,29 +197,25 @@ fn readFileData(alloc: Allocator, p: []const u8) ![]u8 {
     return try f.readToEndAlloc(alloc, 1 << 30);
 }
 
-fn makeAdjacencyMap(alloc: Allocator, point_lookup: *const map_data.PointLookup, index_buffer: []const u32) !map_data.NodeAdjacencyMap {
-    var arena = std.heap.ArenaAllocator.init(alloc);
-    defer arena.deinit();
+fn parseIndexBuffer(alloc: Allocator, point_lookup: *const map_data.PointLookup, index_buffer: []const u32) !struct { WayLookup, map_data.NodeAdjacencyMap } {
+    var ways = WayLookup.Builder.init(alloc, index_buffer);
+    defer ways.deinit();
 
-    const tmp_alloc = arena.allocator();
-    var node_neighbors = try tmp_alloc.alloc(std.AutoArrayHashMapUnmanaged(map_data.NodeId, void), point_lookup.numPoints());
-    @memset(node_neighbors, std.AutoArrayHashMapUnmanaged(map_data.NodeId, void){});
+    var node_neighbors = try map_data.NodeAdjacencyMap.Builder.init(alloc, point_lookup.numPoints());
+    defer node_neighbors.deinit();
 
     var it = map_data.IndexBufferIt.init(index_buffer);
+
     while (it.next()) |idx_buf_range| {
         const way = map_data.Way.fromIndexRange(idx_buf_range, index_buffer);
-        for (way.node_ids, 0..) |node_id, i| {
-            if (i > 0) {
-                try node_neighbors[node_id.value].put(tmp_alloc, way.node_ids[i - 1], {});
-            }
-
-            if (i < way.node_ids.len - 1) {
-                try node_neighbors[node_id.value].put(tmp_alloc, way.node_ids[i + 1], {});
-            }
-        }
+        try ways.feed(way);
+        try node_neighbors.feed(way);
     }
 
-    return try map_data.NodeAdjacencyMap.init(alloc, node_neighbors);
+    const way_lookup = try ways.build();
+    const adjacency_map = try node_neighbors.build();
+
+    return .{ way_lookup, adjacency_map };
 }
 
 pub fn main() !void {
@@ -192,7 +225,7 @@ pub fn main() !void {
     const alloc = gpa.allocator();
 
     var args = try Args.parse(alloc);
-    defer args.deinit();
+    defer args.deinit(alloc);
 
     const map_data_buf = try readFileData(alloc, args.map_data_bin);
     defer alloc.free(map_data_buf);
@@ -208,12 +241,32 @@ pub fn main() !void {
     _ = map_data.latLongToMeters(split_data.point_data, parsed.value);
 
     const point_lookup = map_data.PointLookup{ .points = split_data.point_data };
-    var adjacency_map = try makeAdjacencyMap(alloc, &point_lookup, split_data.index_data);
+    const elems = try parseIndexBuffer(alloc, &point_lookup, split_data.index_data);
+    var way_lookup = elems[0];
+    defer way_lookup.deinit(alloc);
+
+    var adjacency_map = elems[1];
     defer adjacency_map.deinit(alloc);
+
+    var cost_tracker = monitored_attributes.CostTracker.init(alloc, &parsed.value, &way_lookup);
+    defer cost_tracker.deinit();
+
+    var string_table = try map_data.StringTable.init(alloc, split_data.string_table_data);
+    defer string_table.deinit(alloc);
+
+    for (args.attribute_costs) |cost| {
+        const k_id = string_table.findByStringContent(cost.k);
+        const v_id = string_table.findByStringContent(cost.v);
+        const id = try cost_tracker.push(k_id, v_id);
+        try cost_tracker.update(id, cost.cost);
+    }
+
+    var node_costs = map_data.NodePairCostMultiplierMap.init(alloc);
+    defer node_costs.deinit();
 
     const start = try std.time.Instant.now();
     for (0..args.num_iters) |_| {
-        var pp = try PathPlanner.init(alloc, &point_lookup, &adjacency_map, args.start, args.end, args.turning_cost);
+        var pp = try PathPlanner.init(alloc, &point_lookup, &adjacency_map, &node_costs, args.start, args.end, args.turning_cost, 1.0);
         defer pp.deinit();
 
         const path = try pp.run();

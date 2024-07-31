@@ -48,9 +48,11 @@ const CameFrom = LinearAstarLookup(AStarNode);
 alloc: Allocator,
 points: *const PointLookup,
 adjacency_map: *const NodeAdjacencyMap,
+node_costs: *const map_data.NodePairCostMultiplierMap,
 gscores: GScores,
 came_from: CameFrom,
 turning_cost: f32,
+min_cost_multiplier: f32,
 q: std.PriorityQueue(NodeWithFscore, void, order),
 start: NodeId,
 end: NodeId,
@@ -71,7 +73,7 @@ const NodeWithFscore = struct {
     fscore: f32,
 };
 
-pub fn init(alloc: Allocator, points: *const PointLookup, adjacency_map: *const NodeAdjacencyMap, start: NodeId, end: NodeId, turning_cost: f32) !PathPlanner {
+pub fn init(alloc: Allocator, points: *const PointLookup, adjacency_map: *const NodeAdjacencyMap, node_costs: *const map_data.NodePairCostMultiplierMap, start: NodeId, end: NodeId, turning_cost: f32, min_cost_multiplier: f32) !PathPlanner {
     var gscores = try GScores.init(alloc, adjacency_map);
     @memset(gscores.storage, std.math.inf(f32));
     errdefer gscores.deinit(alloc);
@@ -87,12 +89,14 @@ pub fn init(alloc: Allocator, points: *const PointLookup, adjacency_map: *const 
         .alloc = alloc,
         .points = points,
         .adjacency_map = adjacency_map,
+        .node_costs = node_costs,
         .gscores = gscores,
         .came_from = came_from,
         .q = q,
         .start = start,
         .end = end,
         .turning_cost = turning_cost,
+        .min_cost_multiplier = min_cost_multiplier,
     };
 
     try ret.q.add(.{
@@ -174,14 +178,15 @@ fn updateNeighbor(self: *PathPlanner, current: AStarNode, neighbor: AStarNode, c
         neighbor_point.sub(current_point),
     );
 
-    const tentative_score = current_score + self.distance(current.me, neighbor.me) + this_turning_cost;
+    const node_cost = self.node_costs.getCost(current.me, neighbor.me);
+    const tentative_score = current_score + self.distance(current.me, neighbor.me) * node_cost + this_turning_cost;
     const neighbor_entry = self.gscores.get(neighbor);
     if (tentative_score >= neighbor_entry.*) {
         return;
     }
 
     neighbor_entry.* = tentative_score;
-    const fscore = tentative_score + self.distance(neighbor.me, self.end);
+    const fscore = tentative_score + self.distance(neighbor.me, self.end) * self.min_cost_multiplier;
     self.came_from.get(neighbor).* = current;
 
     const neighbor_w_fscore = NodeWithFscore{

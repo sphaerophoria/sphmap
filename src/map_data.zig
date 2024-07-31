@@ -57,6 +57,33 @@ pub const PointLookup = struct {
 pub const WayLookup = struct {
     ways: []const Way,
 
+    pub const Builder = struct {
+        ways: std.ArrayList(Way),
+        index_buffer: []const u32,
+
+        pub fn init(alloc: Allocator, index_buffer: []const u32) Builder {
+            return .{
+                .ways = std.ArrayList(Way).init(alloc),
+                .index_buffer = index_buffer,
+            };
+        }
+
+        pub fn deinit(self: *Builder) void {
+            self.ways.deinit();
+        }
+
+        pub fn feed(self: *Builder, way: Way) !void {
+            try self.ways.append(way);
+        }
+
+        pub fn build(self: *Builder) !WayLookup {
+            const ways = try self.ways.toOwnedSlice();
+            return .{
+                .ways = ways,
+            };
+        }
+    };
+
     pub fn deinit(self: *WayLookup, alloc: Allocator) void {
         alloc.free(self.ways);
     }
@@ -71,6 +98,48 @@ pub const NodeAdjacencyMap = struct {
     segment_starts: []u32,
     // All neighbors for all nodes, Each node's neighbors are contiguous
     storage: []const NodeId,
+
+    pub const Builder = struct {
+        arena: *std.heap.ArenaAllocator,
+        node_neighbors: []std.AutoArrayHashMapUnmanaged(NodeId, void),
+
+        pub fn init(alloc: Allocator, num_points: usize) !Builder {
+            var arena = try alloc.create(std.heap.ArenaAllocator);
+            errdefer alloc.destroy(arena);
+            arena.* = std.heap.ArenaAllocator.init(alloc);
+
+            const arena_alloc = arena.allocator();
+            const node_neighbors = try arena_alloc.alloc(std.AutoArrayHashMapUnmanaged(NodeId, void), num_points);
+            @memset(node_neighbors, std.AutoArrayHashMapUnmanaged(NodeId, void){});
+            return .{
+                .arena = arena,
+                .node_neighbors = node_neighbors,
+            };
+        }
+
+        pub fn deinit(self: *Builder) void {
+            const alloc = self.arena.child_allocator;
+            self.arena.deinit();
+            alloc.destroy(self.arena);
+        }
+
+        pub fn feed(self: *Builder, way: Way) !void {
+            const arena_alloc = self.arena.allocator();
+            for (way.node_ids, 0..) |node_id, i| {
+                if (i > 0) {
+                    try self.node_neighbors[node_id.value].put(arena_alloc, way.node_ids[i - 1], {});
+                }
+
+                if (i < way.node_ids.len - 1) {
+                    try self.node_neighbors[node_id.value].put(arena_alloc, way.node_ids[i + 1], {});
+                }
+            }
+        }
+
+        pub fn build(self: *Builder) !NodeAdjacencyMap {
+            return try NodeAdjacencyMap.init(self.arena.child_allocator, self.node_neighbors);
+        }
+    };
 
     pub fn init(alloc: Allocator, node_neighbors: []std.AutoArrayHashMapUnmanaged(NodeId, void)) !NodeAdjacencyMap {
         var storage = std.ArrayList(NodeId).init(alloc);
@@ -101,6 +170,41 @@ pub const NodeAdjacencyMap = struct {
         const end = self.segment_starts[node.value + 1];
 
         return self.storage[start..end];
+    }
+};
+
+const NodePair = struct {
+    a: NodeId,
+    b: NodeId,
+};
+pub const NodePairCostMultiplierMap = struct {
+    costs: std.AutoHashMap(NodePair, f32),
+
+    pub fn init(alloc: Allocator) NodePairCostMultiplierMap {
+        return .{
+            .costs = std.AutoHashMap(NodePair, f32).init(alloc),
+        };
+    }
+
+    pub fn deinit(self: *NodePairCostMultiplierMap) void {
+        self.costs.deinit();
+    }
+
+    pub fn putCost(self: *NodePairCostMultiplierMap, a: NodeId, b: NodeId, cost: f32) !void {
+        try self.costs.put(makeNodePair(a, b), cost);
+    }
+
+    pub fn getCost(self: *const NodePairCostMultiplierMap, a: NodeId, b: NodeId) f32 {
+        return self.costs.get(makeNodePair(a, b)) orelse 1.0;
+    }
+
+    fn makeNodePair(a: NodeId, b: NodeId) NodePair {
+        const larger = @max(a.value, b.value);
+        const smaller = @min(a.value, b.value);
+        return .{
+            .a = .{ .value = smaller },
+            .b = .{ .value = larger },
+        };
     }
 };
 
@@ -171,6 +275,26 @@ pub const StringTable = struct {
 
     pub fn get(self: *const StringTable, id: StringTableId) []const u8 {
         return self.data[id];
+    }
+
+    pub fn findByPointerAddress(self: *const StringTable, p: [*]const u8) StringTableId {
+        for (self.data, 0..) |item, i| {
+            if (item.ptr == p) {
+                return i;
+            }
+        }
+
+        @panic("No id");
+    }
+
+    pub fn findByStringContent(self: *const StringTable, s: []const u8) StringTableId {
+        for (self.data, 0..) |item, i| {
+            if (std.mem.eql(u8, item, s)) {
+                return i;
+            }
+        }
+
+        @panic("No id");
     }
 };
 
@@ -250,5 +374,40 @@ pub const MapDataComponents = struct {
             .index_data = @alignCast(std.mem.bytesAsSlice(u32, data[@intCast(metadata.end_nodes)..@intCast(metadata.end_ways)])),
             .string_table_data = data[@intCast(metadata.end_ways)..],
         };
+    }
+};
+
+pub const WaysForTagPair = struct {
+    metadata: *const Metadata,
+    ways: *const WayLookup,
+    k: usize,
+    v: usize,
+    i: usize = 0,
+
+    pub fn init(metadata: *const Metadata, ways: *const WayLookup, k: usize, v: usize) WaysForTagPair {
+        return .{
+            .metadata = metadata,
+            .ways = ways,
+            .k = k,
+            .v = v,
+        };
+    }
+
+    pub fn next(self: *WaysForTagPair) ?Way {
+        while (true) {
+            if (self.i >= self.metadata.way_tags.len) {
+                return null;
+            }
+            defer self.i += 1;
+
+            const way_tags = self.metadata.way_tags[self.i];
+            for (0..way_tags[0].len) |tag_id| {
+                const way_k = way_tags[0][tag_id];
+                const way_v = way_tags[1][tag_id];
+                if (way_k == self.k and way_v == self.v) {
+                    return self.ways.ways[self.i];
+                }
+            }
+        }
     }
 };

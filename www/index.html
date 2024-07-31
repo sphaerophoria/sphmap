@@ -26,10 +26,23 @@
         position: absolute;
         bottom: 20px;
         right: 20px;
-        width: 300px;
+        width: 350px;
         background-color: rgba(0, 0, 0, 0.7);
         padding: 5px;
         color: white;
+      }
+      .way_tag {
+        display: grid;
+        grid-template-columns: 1fr min-content;
+      }
+
+      .monitored_attribute {
+        display: grid;
+        grid-template-columns: 1fr min-content min-content min-content;
+      }
+
+      .monitored_attribute input[type="number"] {
+        width: 7ch;
       }
     </style>
   </head>
@@ -46,7 +59,7 @@
       <br />
       <input type="checkbox" id="debug_path" />
       <label for="debug_path">Debug path planning</label>
-      <br />
+      <div id="monitored"></div>
       <input type="number" id="turning_cost" />
       <label for="turning_cost">Turning cost</label>
       <br />

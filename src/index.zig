@@ -52,7 +52,7 @@ pub export fn pushImageTileData(len: usize) void {
 }
 
 const GlobalState = struct {
-    app: App = undefined,
+    app: *App = undefined,
     map_data: std.ArrayList(u8) = std.ArrayList(u8).init(std.heap.wasm_allocator),
     metadata_buf: std.ArrayList(u8) = std.ArrayList(u8).init(std.heap.wasm_allocator),
     image_tile_metadata_buf: std.ArrayList(u8) = std.ArrayList(u8).init(std.heap.wasm_allocator),
@@ -136,5 +136,31 @@ pub export fn setTurningCost(cost: f32) void {
 pub export fn registerTexture(id: usize, tex: i32) void {
     global.app.registerTexture(id, tex) catch |e| {
         std.log.err("Failed to register texture: {any}", .{e});
+    };
+}
+
+pub export fn monitorWayAttribute(k: [*]u8, v: [*]u8) void {
+    global.app.monitorWayAttribute(k, v) catch |e| {
+        std.log.err("Failed to monitor way: {any}", .{e});
+    };
+}
+
+pub export fn removeMonitoredAttribute(id: usize) void {
+    global.app.removeMonitoredAttribute(id) catch |e| {
+        std.log.err("Failed to remove monitored attribute: {s}", .{@errorName(e)});
+    };
+}
+
+fn colorf32(c: u8) f32 {
+    return @as(f32, @floatFromInt(c)) / 255.0;
+}
+
+pub export fn setMonitoredColor(id: usize, r: u8, g: u8, b: u8) void {
+    global.app.monitored_attributes.rendering.update(id, colorf32(r), colorf32(g), colorf32(b));
+}
+
+pub export fn setMonitoredCostMultiplier(id: usize, multiplier: f32) void {
+    global.app.monitored_attributes.cost.update(id, multiplier) catch |e| {
+        std.log.err("Failed to set cost multiplier: {s}", .{@errorName(e)});
     };
 }

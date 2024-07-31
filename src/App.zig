@@ -8,6 +8,7 @@ const PathPlanner = @import("PathPlanner.zig");
 const Renderer = @import("Renderer.zig");
 const TextureRenderer = @import("TextureRenderer.zig");
 const gl_utils = @import("gl_utils.zig");
+const monitored_attributes = @import("monitored_attributes.zig");
 const Gl = gl_utils.Gl;
 const image_tile_data = @import("image_tile_data.zig");
 const ImageTileData = image_tile_data.ImageTileData;
@@ -23,6 +24,7 @@ const WayId = map_data.WayId;
 const StringTable = map_data.StringTable;
 const gui = @import("gui_bindings.zig");
 const ViewState = Renderer.ViewState;
+const WaysForTagPair = map_data.WaysForTagPair;
 
 const App = @This();
 
@@ -42,11 +44,12 @@ path_start: ?NodeId = null,
 closest_node: NodeId = NodeId{ .value = 0 },
 turning_cost: f32 = 0.0,
 textures: []i32,
+monitored_attributes: monitored_attributes.MonitoredAttributeTracker,
 debug_way_finding: bool = false,
 debug_point_neighbors: bool = false,
 debug_path_finding: bool = false,
 
-pub fn init(alloc: Allocator, aspect_val: f32, map_data_buf: []u8, metadata: *const Metadata, image_tile_metadata: ImageTileData) !App {
+pub fn init(alloc: Allocator, aspect_val: f32, map_data_buf: []u8, metadata: *const Metadata, image_tile_metadata: ImageTileData) !*App {
     const split_data = map_data.MapDataComponents.init(map_data_buf, metadata.*);
     const meter_metdata = map_data.latLongToMeters(split_data.point_data, metadata.*);
 
@@ -87,7 +90,10 @@ pub fn init(alloc: Allocator, aspect_val: f32, map_data_buf: []u8, metadata: *co
 
     const texture_renderer = TextureRenderer.init();
 
-    return .{
+    const ret = try alloc.create(App);
+    errdefer alloc.destroy(ret);
+
+    ret.* = .{
         .alloc = alloc,
         .adjacency_map = adjacency_map,
         .image_tile_metadata = image_tile_metadata,
@@ -100,7 +106,13 @@ pub fn init(alloc: Allocator, aspect_val: f32, map_data_buf: []u8, metadata: *co
         .way_buckets = way_buckets,
         .string_table = string_table,
         .textures = textures,
+        // Sibling reference
+        .monitored_attributes = undefined,
     };
+
+    ret.monitored_attributes = monitored_attributes.MonitoredAttributeTracker.init(alloc, metadata, &ret.ways);
+
+    return ret;
 }
 
 pub fn deinit(self: *App) void {
@@ -108,6 +120,8 @@ pub fn deinit(self: *App) void {
     self.ways.deinit(self.alloc);
     self.way_buckets.deinit();
     self.string_table.deinit(self.alloc);
+    self.monitored_attributes.deinit();
+    self.alloc.destroy(self);
 }
 
 pub fn onMouseDown(self: *App, x: f32, y: f32) void {
@@ -193,18 +207,18 @@ pub fn onMouseMove(self: *App, x: f32, y: f32) !void {
             bound_renderer.inner.point_size.set(10.0);
             bound_renderer.renderPoints(neighbors, Gl.POINTS);
         }
+        bound_renderer.inner.r.set(0);
+        bound_renderer.inner.g.set(1);
+        bound_renderer.inner.b.set(1);
         bound_renderer.renderSelectedWay(self.ways.get(calc.min_way));
         if (self.debug_way_finding) {
             bound_renderer.renderCoords(&.{ self.view_state.center.x, self.view_state.center.y, calc.min_dist_loc.x, calc.min_dist_loc.y }, Gl.LINE_STRIP);
         }
-        bound_renderer.inner.r.set(1.0);
-        bound_renderer.inner.g.set(1.0);
-        bound_renderer.inner.b.set(1.0);
         bound_renderer.inner.point_size.set(10.0);
         bound_renderer.renderPoints(&.{node_id}, Gl.POINTS);
 
         if (self.path_start) |path_start| {
-            var pp = try PathPlanner.init(self.alloc, &self.points, &self.adjacency_map, path_start, node_id, self.turning_cost);
+            var pp = try PathPlanner.init(self.alloc, &self.points, &self.adjacency_map, &self.monitored_attributes.cost.node_costs, path_start, node_id, self.turning_cost, self.monitored_attributes.cost.min_cost_multiplier);
             defer pp.deinit();
 
             if (pp.run()) |new_path| {
@@ -269,6 +283,13 @@ pub fn render(self: *App) void {
 
     const bound_renderer = self.renderer.bind();
     bound_renderer.render(self.view_state);
+
+    for (self.monitored_attributes.rendering.attributes.items) |monitored| {
+        bound_renderer.inner.r.set(monitored.color.r);
+        bound_renderer.inner.g.set(monitored.color.g);
+        bound_renderer.inner.b.set(monitored.color.b);
+        bound_renderer.renderIndexBuffer(monitored.index_buffer, monitored.index_buffer_len, Gl.LINE_STRIP);
+    }
 }
 
 pub fn startPath(self: *App) void {
@@ -284,6 +305,28 @@ pub fn registerTexture(self: *App, id: usize, tex: i32) !void {
     self.render();
 }
 
+pub fn monitorWayAttribute(self: *App, k: [*]const u8, v: [*]const u8) !void {
+    const k_id = self.string_table.findByPointerAddress(k);
+    const v_id = self.string_table.findByPointerAddress(v);
+
+    const attribute_id = try self.monitored_attributes.push(k_id, v_id);
+    const k_full = self.string_table.get(k_id);
+    const v_full = self.string_table.get(v_id);
+
+    gui.pushMonitoredAttribute(attribute_id, k_full.ptr, k_full.len, v_full.ptr, v_full.len);
+}
+
+pub fn removeMonitoredAttribute(self: *App, id: usize) !void {
+    try self.monitored_attributes.remove(id);
+
+    gui.clearMonitoredAttributes();
+    for (self.monitored_attributes.cost.attributes.items, 0..) |item, i| {
+        const k_s = self.string_table.get(item.k);
+        const v_s = self.string_table.get(item.v);
+        gui.pushMonitoredAttribute(i, k_s.ptr, k_s.len, v_s.ptr, v_s.len);
+    }
+}
+
 fn parseIndexBuffer(
     alloc: Allocator,
     point_lookup: PointLookup,
@@ -291,39 +334,31 @@ fn parseIndexBuffer(
     height: f32,
     index_buffer: []const u32,
 ) !struct { WayLookup, WayBuckets, NodeAdjacencyMap } {
-    var ways = std.ArrayList(Way).init(alloc);
+    var ways = WayLookup.Builder.init(alloc, index_buffer);
     defer ways.deinit();
 
     var way_buckets = try WayBuckets.init(alloc, width, height);
     var it = map_data.IndexBufferIt.init(index_buffer);
     var way_id: WayId = .{ .value = 0 };
 
-    var arena = std.heap.ArenaAllocator.init(alloc);
-    defer arena.deinit();
-    const tmp_alloc = arena.allocator();
-    var node_neighbors = try tmp_alloc.alloc(std.AutoArrayHashMapUnmanaged(NodeId, void), point_lookup.numPoints());
-    @memset(node_neighbors, std.AutoArrayHashMapUnmanaged(NodeId, void){});
+    var node_neighbors = try NodeAdjacencyMap.Builder.init(alloc, point_lookup.numPoints());
+    defer node_neighbors.deinit();
 
     while (it.next()) |idx_buf_range| {
         defer way_id.value += 1;
-        const way = Way.fromIndexRange(idx_buf_range, index_buffer);
-        try ways.append(way);
-        for (way.node_ids, 0..) |node_id, i| {
-            if (i > 0) {
-                try node_neighbors[node_id.value].put(tmp_alloc, way.node_ids[i - 1], {});
-            }
+        const way = map_data.Way.fromIndexRange(idx_buf_range, index_buffer);
 
-            if (i < way.node_ids.len - 1) {
-                try node_neighbors[node_id.value].put(tmp_alloc, way.node_ids[i + 1], {});
-            }
+        try ways.feed(way);
+        try node_neighbors.feed(way);
 
+        for (way.node_ids) |node_id| {
             const gps_pos = point_lookup.get(node_id);
             try way_buckets.push(way_id, gps_pos.y, gps_pos.x);
         }
     }
 
-    const node_adjacency_map = try NodeAdjacencyMap.init(alloc, node_neighbors);
-    const way_lookup = WayLookup{ .ways = try ways.toOwnedSlice() };
+    const node_adjacency_map = try node_neighbors.build();
+    const way_lookup = try ways.build();
     return .{ way_lookup, way_buckets, node_adjacency_map };
 }
 

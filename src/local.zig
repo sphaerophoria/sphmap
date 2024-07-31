@@ -9,6 +9,7 @@ fn readFileData(alloc: Allocator, p: []const u8) ![]u8 {
     defer f.close();
     return try f.readToEndAlloc(alloc, 1 << 30);
 }
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -29,6 +30,13 @@ pub fn main() !void {
 
     var app = try App.init(alloc, 1.0, map_data, &parsed.value, &.{});
     defer app.deinit();
+
+    const monitor_key = app.string_table.findByStringContent("highway");
+    const monitor_val = app.string_table.findByStringContent("footway");
+    const monitor_key_p = app.string_table.get(monitor_key);
+    const monitor_val_p = app.string_table.get(monitor_val);
+
+    try app.monitorWayAttribute(monitor_key_p.ptr, monitor_val_p.ptr);
 
     app.onMouseDown(0.5, 0.5);
     try app.onMouseMove(0.4, 0.4);

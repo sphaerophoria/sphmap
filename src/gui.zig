@@ -128,3 +128,11 @@ pub export fn fetchTexture(id: usize, url: [*]const u8, len: usize) void {
     _ = url;
     _ = len;
 }
+
+pub export fn pushMonitoredAttribute(id: usize, key: [*]const u8, key_len: usize, val: [*]const u8, val_len: usize) void {
+    _ = id;
+    _ = key;
+    _ = key_len;
+    _ = val;
+    _ = val_len;
+}

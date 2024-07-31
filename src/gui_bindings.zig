@@ -1,6 +1,7 @@
 pub extern fn compileLinkProgram(vs: [*]const u8, vs_len: usize, fs: [*]const u8, fs_len: usize) i32;
 pub extern fn glCreateVertexArray() i32;
 pub extern fn glCreateBuffer() i32;
+pub extern fn glDeleteBuffer(id: i32) void;
 pub extern fn glVertexAttribPointer(index: i32, size: i32, type: i32, normalized: bool, stride: i32, offs: i32) void;
 pub extern fn glEnableVertexAttribArray(index: i32) void;
 pub extern fn glBindBuffer(target: i32, id: i32) void;
@@ -21,5 +22,7 @@ pub extern fn glBindTexture(target: i32, val: i32) void;
 pub extern fn clearTags() void;
 pub extern fn pushTag(key: [*]const u8, key_len: usize, val: [*]const u8, val_len: usize) void;
 pub extern fn setNodeId(id: usize) void;
+pub extern fn clearMonitoredAttributes() void;
+pub extern fn pushMonitoredAttribute(id: usize, key: [*]const u8, key_len: usize, val: [*]const u8, val_len: usize) void;
 
 pub extern fn fetchTexture(id: usize, url: [*]const u8, url_len: usize) void;

@@ -133,6 +133,12 @@ const BoundRenderer = struct {
         self.renderCoords(&.{ view_state.center.x, view_state.center.y }, Gl.POINTS);
     }
 
+    pub fn renderIndexBuffer(self: *const BoundRenderer, ebo: i32, len: usize, mode: i32) void {
+        gui.glBindVertexArray(self.inner.vao);
+        gui.glBindBuffer(Gl.ELEMENT_ARRAY_BUFFER, ebo);
+        gui.glDrawElements(mode, @intCast(len), Gl.UNSIGNED_INT, 0);
+    }
+
     pub fn renderPoints(self: *const BoundRenderer, point_ids: []const NodeId, mode: i32) void {
         if (point_ids.len == 0) {
             return;
@@ -154,9 +160,6 @@ const BoundRenderer = struct {
         gui.glBindBuffer(Gl.ELEMENT_ARRAY_BUFFER, self.inner.ebo);
         const point_ids = way.indexRange(self.inner.index_buffer);
         gui.glBindVertexArray(self.inner.vao);
-        self.inner.r.set(0.0);
-        self.inner.g.set(1.0);
-        self.inner.b.set(1.0);
         gui.glDrawElements(Gl.LINE_STRIP, @intCast(point_ids.end - point_ids.start), Gl.UNSIGNED_INT, @intCast(point_ids.start * 4));
     }
 
