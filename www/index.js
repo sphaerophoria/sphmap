@@ -399,6 +399,14 @@ async function loadImageTileMetadata(mod) {
   );
 }
 
+async function loadConfigPreset(mod) {
+  await loadDataFromServer(
+    "config_preset.json",
+    mod,
+    mod.instance.exports.pushConfigPreset,
+  );
+}
+
 function canvasAspect(canvas) {
   const rect = canvas.getBoundingClientRect();
   return rect.width / rect.height;
@@ -479,6 +487,7 @@ async function init() {
   await loadPointsData(mod);
   await loadMetadata(mod);
   await loadImageTileMetadata(mod);
+  await loadConfigPreset(mod);
 
   mod.instance.exports.init(canvasAspect(canvas));
   mod.instance.exports.render();

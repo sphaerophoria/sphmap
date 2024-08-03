@@ -282,6 +282,7 @@ const Args = struct {
     index_wasm: []const u8,
     output: []const u8,
     image_tile_data: []const u8,
+    config_preset: []const u8,
     it: std.process.ArgIterator,
 
     const Option = enum {
@@ -289,6 +290,7 @@ const Args = struct {
         @"--input-www",
         @"--index-wasm",
         @"--image-tile-data",
+        @"--config-preset",
         @"--output",
     };
     fn deinit(self: *Args) void {
@@ -302,6 +304,7 @@ const Args = struct {
         var osm_data_opt: ?[]const u8 = null;
         var input_www_opt: ?[]const u8 = null;
         var index_wasm_opt: ?[]const u8 = null;
+        var config_preset: []const u8 = &.{};
         var image_tile_data: []const u8 = &.{};
         var output_opt: ?[]const u8 = null;
 
@@ -316,6 +319,7 @@ const Args = struct {
                 .@"--input-www" => input_www_opt = it.next(),
                 .@"--index-wasm" => index_wasm_opt = it.next(),
                 .@"--image-tile-data" => image_tile_data = it.next() orelse @panic("no --image-tile arg"),
+                .@"--config-preset" => config_preset = it.next() orelse @panic("no --config-preset arg"),
                 .@"--output" => output_opt = it.next(),
             }
         }
@@ -325,6 +329,7 @@ const Args = struct {
             .input_www = input_www_opt orelse return error.NoWww,
             .index_wasm = index_wasm_opt orelse return error.NoWasm,
             .image_tile_data = image_tile_data,
+            .config_preset = config_preset,
             .output = output_opt orelse return error.NoOutput,
             .it = it,
         };
@@ -491,5 +496,20 @@ pub fn main() !void {
         const link_path = try std.fs.path.relative(alloc, args.output, args.image_tile_data);
         defer alloc.free(link_path);
         try std.fs.cwd().symLink(link_path, image_tile_data_path, std.fs.Dir.SymLinkFlags{});
+    }
+
+    const config_preset_path = try std.fs.path.join(alloc, &.{ args.output, "config_preset.json" });
+    defer alloc.free(config_preset_path);
+    if (args.config_preset.len == 0) {
+        std.fs.cwd().deleteFile(config_preset_path) catch {};
+        const f = try std.fs.cwd().createFile(config_preset_path, .{
+            .exclusive = true,
+        });
+        defer f.close();
+        try f.writeAll("[]");
+    } else {
+        std.fs.cwd().deleteFile(config_preset_path) catch {};
+        const link_path = try std.fs.path.relative(alloc, args.output, args.config_preset);
+        try std.fs.cwd().symLink(link_path, config_preset_path, std.fs.Dir.SymLinkFlags{});
     }
 }

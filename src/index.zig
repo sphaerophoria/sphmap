@@ -51,11 +51,16 @@ pub export fn pushImageTileData(len: usize) void {
     global.image_tile_metadata_buf.appendSlice(global_chunk[0..len]) catch unreachable;
 }
 
+pub export fn pushConfigPreset(len: usize) void {
+    global.config_preset_buf.appendSlice(global_chunk[0..len]) catch unreachable;
+}
+
 const GlobalState = struct {
     app: *App = undefined,
     map_data: std.ArrayList(u8) = std.ArrayList(u8).init(std.heap.wasm_allocator),
     metadata_buf: std.ArrayList(u8) = std.ArrayList(u8).init(std.heap.wasm_allocator),
     image_tile_metadata_buf: std.ArrayList(u8) = std.ArrayList(u8).init(std.heap.wasm_allocator),
+    config_preset_buf: std.ArrayList(u8) = std.ArrayList(u8).init(std.heap.wasm_allocator),
     metadata: Metadata = .{},
     image_tile_metadata: ImageTileData = &.{},
 };
