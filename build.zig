@@ -40,6 +40,7 @@ const Builder = struct {
             .target = self.target,
             .optimize = self.opt,
         });
+        exe.linkSystemLibrary("sqlite3");
         exe.linkSystemLibrary("expat");
         exe.linkLibC();
         _ = self.installAndCheck(exe);

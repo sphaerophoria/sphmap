@@ -290,6 +290,13 @@ pub fn render(self: *App) void {
         bound_renderer.inner.b.set(monitored.color.b);
         bound_renderer.renderIndexBuffer(monitored.index_buffer, monitored.index_buffer_len, Gl.LINE_STRIP);
     }
+
+    const len = self.points.numPoints() - self.metadata.bus_node_start_idx;
+    bound_renderer.inner.r.set(1.0);
+    bound_renderer.inner.g.set(0.0);
+    bound_renderer.inner.b.set(0.0);
+    gui.glBindVertexArray(bound_renderer.inner.vao);
+    gui.glDrawArrays(Gl.POINTS, @intCast(self.metadata.bus_node_start_idx), @intCast(len));
 }
 
 pub fn startPath(self: *App) void {

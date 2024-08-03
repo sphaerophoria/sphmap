@@ -4,6 +4,7 @@ const Metadata = @import("Metadata.zig");
 const XmlParser = @import("XmlParser.zig");
 const image_tile_data_mod = @import("image_tile_data.zig");
 const Allocator = std.mem.Allocator;
+const BusDb =  @import("BusDb.zig");
 
 const NodeIdIdxMap = std.AutoHashMap(i64, usize);
 
@@ -50,6 +51,7 @@ const WayCache = struct {
 const MapDataWriter = struct {
     writer: std.io.AnyWriter,
     node_id_idx_map: NodeIdIdxMap,
+    num_pushed_nodes: usize = 0,
     min_lat: f32 = std.math.floatMax(f32),
     max_lat: f32 = -std.math.floatMax(f32),
     min_lon: f32 = std.math.floatMax(f32),
@@ -66,6 +68,7 @@ const MapDataWriter = struct {
         self.min_lat = @min(lat, self.min_lat);
 
         self.node_id_idx_map.put(node_id, self.node_id_idx_map.count()) catch return;
+        self.num_pushed_nodes += 1;
 
         comptime std.debug.assert(builtin.cpu.arch.endian() == .little);
         try self.writer.writeAll(std.mem.asBytes(&lon));
@@ -398,6 +401,9 @@ pub fn main() !void {
     };
     defer userdata.deinit();
 
+    var bus_db = try BusDb.init("test.db");
+    const stops = try bus_db.getAllStops(alloc);
+
     try runParser(alloc, args.osm_data, .{
         .ctx = &userdata,
         .startElement = startElement,
@@ -423,6 +429,16 @@ pub fn main() !void {
         }
     }
 
+    const bus_node_start: u32 = @intCast(data_writer.num_pushed_nodes);
+
+    for (stops) |route_stops| {
+        for (route_stops) |stop| {
+            try data_writer.pushNode(-1, stop.lon, stop.lat);
+        }
+    }
+
+    const end_nodes = counting_writer.bytes_written;
+
     for (userdata.way_nodes.items) |way_nodes| {
         try data_writer.pushWayNodes(way_nodes);
     }
@@ -439,8 +455,9 @@ pub fn main() !void {
         .max_lat = data_writer.max_lat,
         .min_lon = data_writer.min_lon,
         .max_lon = data_writer.max_lon,
-        .end_nodes = data_writer.node_id_idx_map.count() * 8,
+        .end_nodes = end_nodes,
         .end_ways = end_ways,
+        .bus_node_start_idx = bus_node_start,
         .way_tags = try userdata.way_tags.toOwnedSlice(),
     };
     try std.json.stringify(metadata, .{}, metadata_out_f.writer());

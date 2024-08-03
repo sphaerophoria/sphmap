@@ -20,6 +20,8 @@ pkgs.mkShell {
     nodePackages.prettier
     nodePackages.jshint
     linuxPackages_latest.perf
+    sqlite
+    sqlitebrowser
   ];
 }
 
