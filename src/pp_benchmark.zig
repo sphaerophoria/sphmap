@@ -205,6 +205,8 @@ pub fn main() !void {
 
     const split_data = map_data.MapDataComponents.init(map_data_buf, parsed.value);
 
+    _ = map_data.latLongToMeters(split_data.point_data, parsed.value);
+
     const point_lookup = map_data.PointLookup{ .points = split_data.point_data };
     var adjacency_map = try makeAdjacencyMap(alloc, &point_lookup, split_data.index_data);
     defer adjacency_map.deinit(alloc);
