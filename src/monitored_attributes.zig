@@ -17,18 +17,24 @@ pub const CostTracker = struct {
     node_costs: map_data.NodePairCostMultiplierMap,
     metadata: *const Metadata,
     ways: *const map_data.WayLookup,
+    point_pair_to_parents: *const map_data.NodePairMap(map_data.WayId),
+    adjacency_map: *const map_data.NodeAdjacencyMap,
     min_cost_multiplier: f32 = 1.0,
 
     pub fn init(
         alloc: Allocator,
         metadata: *const Metadata,
         ways: *const map_data.WayLookup,
+        point_pair_to_parents: *const map_data.NodePairMap(map_data.WayId),
+        adjacency_map: *const map_data.NodeAdjacencyMap,
     ) CostTracker {
         return .{
             .alloc = alloc,
             .node_costs = map_data.NodePairCostMultiplierMap.init(alloc),
             .metadata = metadata,
             .ways = ways,
+            .point_pair_to_parents = point_pair_to_parents,
+            .adjacency_map = adjacency_map,
         };
     }
 
@@ -46,20 +52,21 @@ pub const CostTracker = struct {
     pub fn update(self: *CostTracker, id: usize, multiplier: f32) !void {
         const monitored_attribute = &self.attributes.items[id];
         monitored_attribute.multiplier = multiplier;
-        var it = map_data.WaysForTagPair.init(self.metadata, self.ways, monitored_attribute.k, monitored_attribute.v);
-        while (it.next()) |way| {
-            for (0..way.node_ids.len - 1) |i| {
-                const a = way.node_ids[i];
-                const b = way.node_ids[i + 1];
-                try self.node_costs.putCost(a, b, multiplier);
-            }
-        }
+        try self.recalculateNodeCosts();
+        //var it = map_data.WaysForTagPair.init(self.metadata, self.ways, monitored_attribute.k, monitored_attribute.v);
+        //while (it.next()) |way| {
+        //    for (0..way.node_ids.len - 1) |i| {
+        //        const a = way.node_ids[i];
+        //        const b = way.node_ids[i + 1];
+        //        try self.node_costs.put(a, b, multiplier);
+        //    }
+        //}
 
-        var min: f32 = 1.0;
-        for (self.attributes.items) |attr| {
-            min = @min(min, attr.multiplier);
-        }
-        self.min_cost_multiplier = min;
+        //var min: f32 = 1.0;
+        //for (self.attributes.items) |attr| {
+        //    min = @min(min, attr.multiplier);
+        //}
+        //self.min_cost_multiplier = min;
     }
 
     pub fn remove(self: *CostTracker, id: usize) !void {
@@ -69,6 +76,7 @@ pub const CostTracker = struct {
 
     fn recalculateNodeCosts(self: *CostTracker) !void {
         self.min_cost_multiplier = 1.0;
+        self.node_costs.inner.clearRetainingCapacity();
 
         for (self.attributes.items) |monitored_attribute| {
             var it = map_data.WaysForTagPair.init(self.metadata, self.ways, monitored_attribute.k, monitored_attribute.v);
@@ -76,8 +84,15 @@ pub const CostTracker = struct {
                 for (0..way.node_ids.len - 1) |i| {
                     const a = way.node_ids[i];
                     const b = way.node_ids[i + 1];
-                    try self.node_costs.putCost(a, b, monitored_attribute.multiplier);
+                    const cost = self.node_costs.get(a, b) orelse 1.0;
+                    try self.node_costs.put(a, b, cost * monitored_attribute.multiplier);
                 }
+            }
+
+            var parent_it = map_data.NodePairsForParentTagPair.init(monitored_attribute.k, monitored_attribute.v, self.metadata, self.point_pair_to_parents, self.adjacency_map);
+            while (parent_it.next()) |node_pair| {
+                const cost = self.node_costs.get(node_pair.a, node_pair.b) orelse 1.0;
+                try self.node_costs.put(node_pair.a, node_pair.b, cost * monitored_attribute.multiplier);
             }
             self.min_cost_multiplier = @min(self.min_cost_multiplier, monitored_attribute.multiplier);
         }
@@ -161,8 +176,10 @@ pub const MonitoredAttributeTracker = struct {
         alloc: Allocator,
         metadata: *const Metadata,
         ways: *const map_data.WayLookup,
+        point_pair_to_parents: *const map_data.NodePairMap(map_data.WayId),
+        adjacency_map: *const map_data.NodeAdjacencyMap,
     ) MonitoredAttributeTracker {
-        const cost = CostTracker.init(alloc, metadata, ways);
+        const cost = CostTracker.init(alloc, metadata, ways, point_pair_to_parents, adjacency_map);
         const rendering = RenderingTracker.init(alloc, metadata, ways);
 
         return .{

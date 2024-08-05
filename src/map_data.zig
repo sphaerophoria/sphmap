@@ -171,42 +171,53 @@ pub const NodeAdjacencyMap = struct {
 
         return self.storage[start..end];
     }
+
+    pub fn numNodes(self: *const NodeAdjacencyMap) usize {
+        return self.segment_starts.len - 1;
+    }
 };
 
-const NodePair = struct {
+pub const NodePair = struct {
     a: NodeId,
     b: NodeId,
 };
-pub const NodePairCostMultiplierMap = struct {
-    costs: std.AutoHashMap(NodePair, f32),
 
-    pub fn init(alloc: Allocator) NodePairCostMultiplierMap {
-        return .{
-            .costs = std.AutoHashMap(NodePair, f32).init(alloc),
-        };
-    }
+pub fn NodePairMap(comptime T: type) type {
+    return struct {
+        inner: std.AutoHashMap(NodePair, T),
 
-    pub fn deinit(self: *NodePairCostMultiplierMap) void {
-        self.costs.deinit();
-    }
+        const Self = @This();
 
-    pub fn putCost(self: *NodePairCostMultiplierMap, a: NodeId, b: NodeId, cost: f32) !void {
-        try self.costs.put(makeNodePair(a, b), cost);
-    }
+        pub fn init(alloc: Allocator) Self {
+            return .{
+                .inner = std.AutoHashMap(NodePair, T).init(alloc),
+            };
+        }
 
-    pub fn getCost(self: *const NodePairCostMultiplierMap, a: NodeId, b: NodeId) f32 {
-        return self.costs.get(makeNodePair(a, b)) orelse 1.0;
-    }
+        pub fn deinit(self: *Self) void {
+            self.inner.deinit();
+        }
 
-    fn makeNodePair(a: NodeId, b: NodeId) NodePair {
-        const larger = @max(a.value, b.value);
-        const smaller = @min(a.value, b.value);
-        return .{
-            .a = .{ .value = smaller },
-            .b = .{ .value = larger },
-        };
-    }
-};
+        pub fn put(self: *Self, a: NodeId, b: NodeId, value: T) !void {
+            try self.inner.put(makeNodePair(a, b), value);
+        }
+
+        pub fn get(self: *const Self, a: NodeId, b: NodeId) ?T {
+            return self.inner.get(makeNodePair(a, b));
+        }
+
+        fn makeNodePair(a: NodeId, b: NodeId) NodePair {
+            const larger = @max(a.value, b.value);
+            const smaller = @min(a.value, b.value);
+            return .{
+                .a = .{ .value = smaller },
+                .b = .{ .value = larger },
+            };
+        }
+    };
+}
+
+pub const NodePairCostMultiplierMap = NodePairMap(f32);
 
 pub const IndexBufferIt = struct {
     data: []const u32,
@@ -401,13 +412,75 @@ pub const WaysForTagPair = struct {
             defer self.i += 1;
 
             const way_tags = self.metadata.way_tags[self.i];
-            for (0..way_tags[0].len) |tag_id| {
-                const way_k = way_tags[0][tag_id];
-                const way_v = way_tags[1][tag_id];
-                if (way_k == self.k and way_v == self.v) {
-                    return self.ways.ways[self.i];
-                }
+            if (wayTagsContains(way_tags, self.k, self.v)) {
+                return self.ways.ways[self.i];
             }
         }
     }
 };
+
+pub const NodePairsForParentTagPair = struct {
+    metadata: *const Metadata,
+    point_pair_to_parent: *const NodePairMap(WayId),
+    adjacency_map: *const NodeAdjacencyMap,
+    k: usize,
+    v: usize,
+    node_idx: NodeId = .{ .value = 0 },
+    neighbor_idx: usize = 0,
+
+    pub fn init(k: usize, v: usize, metadata: *const Metadata, point_pair_to_parent: *const NodePairMap(WayId), adjacency_map: *const NodeAdjacencyMap) NodePairsForParentTagPair {
+        return .{
+            .k = k,
+            .v = v,
+            .metadata = metadata,
+            .point_pair_to_parent = point_pair_to_parent,
+            .adjacency_map = adjacency_map,
+        };
+    }
+
+    pub fn next(self: *NodePairsForParentTagPair) ?NodePair {
+        while (true) {
+            if (self.node_idx.value >= self.adjacency_map.numNodes()) {
+                return null;
+            }
+
+            const neighbors = self.adjacency_map.getNeighbors(self.node_idx);
+            if (self.neighbor_idx >= neighbors.len) {
+                self.node_idx.value += 1;
+                self.neighbor_idx = 0;
+                continue;
+            }
+            defer self.neighbor_idx += 1;
+
+            const neighbor = neighbors[self.neighbor_idx];
+
+            // We only want to see each node pair once
+            if (neighbor.value > self.node_idx.value) {
+                continue;
+            }
+
+            const parent = self.point_pair_to_parent.get(self.node_idx, neighbor) orelse continue;
+
+            const tags = self.metadata.way_tags[parent.value];
+            if (wayTagsContains(tags, self.k, self.v)) {
+                return .{
+                    .a = self.node_idx,
+                    .b = neighbor,
+                };
+            }
+        }
+    }
+};
+
+pub fn wayTagsContains(tags: Metadata.Tags, k: usize, v: usize) bool {
+    for (0..tags[0].len) |i| {
+        const tag_k = tags[0][i];
+        const tag_v = tags[1][i];
+
+        if (tag_k == k and tag_v == v) {
+            return true;
+        }
+    }
+
+    return false;
+}

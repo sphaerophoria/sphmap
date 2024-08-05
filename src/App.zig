@@ -27,6 +27,7 @@ const ViewState = Renderer.ViewState;
 const WaysForTagPair = map_data.WaysForTagPair;
 
 const App = @This();
+const PointPairToWayMap = map_data.NodePairMap(WayId);
 
 alloc: Allocator,
 mouse_tracker: MouseTracker = .{},
@@ -45,6 +46,10 @@ closest_node: NodeId = NodeId{ .value = 0 },
 turning_cost: f32 = 0.0,
 textures: []i32,
 monitored_attributes: monitored_attributes.MonitoredAttributeTracker,
+point_pair_to_parent: PointPairToWayMap,
+pp_viz: i32,
+pp_viz_len: usize,
+min_cost_multiplier: f32 = 1.0,
 debug_way_finding: bool = false,
 debug_point_neighbors: bool = false,
 debug_path_finding: bool = false,
@@ -85,6 +90,15 @@ pub fn init(alloc: Allocator, aspect_val: f32, map_data_buf: []u8, metadata: *co
     var adjacency_map = index_buffer_objs[2];
     errdefer adjacency_map.deinit(alloc);
 
+    var point_pair_to_way = index_buffer_objs[3];
+    defer point_pair_to_way.deinit();
+
+    var point_pair_to_parent = PointPairToWayMap.init(alloc);
+    errdefer point_pair_to_parent.deinit();
+
+    const pp_viz = gui.glCreateBuffer();
+    const pp_viz_len = try findSidewalkStreets(alloc, &point_lookup, &way_buckets, &adjacency_map, &point_pair_to_way, &point_pair_to_parent, &string_table, &way_lookup, metadata, pp_viz);
+
     var renderer = Renderer.init(split_data.point_data, split_data.index_data);
     renderer.bind().render(view_state);
 
@@ -104,13 +118,16 @@ pub fn init(alloc: Allocator, aspect_val: f32, map_data_buf: []u8, metadata: *co
         .points = point_lookup,
         .ways = way_lookup,
         .way_buckets = way_buckets,
+        .point_pair_to_parent = point_pair_to_parent,
         .string_table = string_table,
+        .pp_viz = pp_viz,
+        .pp_viz_len = pp_viz_len,
         .textures = textures,
         // Sibling reference
         .monitored_attributes = undefined,
     };
 
-    ret.monitored_attributes = monitored_attributes.MonitoredAttributeTracker.init(alloc, metadata, &ret.ways);
+    ret.monitored_attributes = monitored_attributes.MonitoredAttributeTracker.init(alloc, metadata, &ret.ways, &ret.point_pair_to_parent, &ret.adjacency_map);
 
     return ret;
 }
@@ -121,6 +138,7 @@ pub fn deinit(self: *App) void {
     self.way_buckets.deinit();
     self.string_table.deinit(self.alloc);
     self.monitored_attributes.deinit();
+    self.point_pair_to_parent.deinit();
     self.alloc.destroy(self);
 }
 
@@ -199,6 +217,18 @@ pub fn onMouseMove(self: *App, x: f32, y: f32) !void {
             unreachable;
         }
         const node_id = way.node_ids[calc.min_way_segment];
+        const neighbor_id = way.node_ids[calc.neighbor_segment];
+
+        if (self.point_pair_to_parent.get(node_id, neighbor_id)) |parent| {
+            std.log.debug("yes parent", .{});
+            bound_renderer.inner.r.set(0);
+            bound_renderer.inner.g.set(0);
+            bound_renderer.inner.b.set(1);
+            bound_renderer.renderSelectedWay(self.ways.get(parent));
+        } else {
+            std.log.debug("no parent", .{});
+        }
+
         self.closest_node = node_id;
         gui.setNodeId(node_id.value);
 
@@ -318,13 +348,97 @@ pub fn monitorWayAttribute(self: *App, k: [*]const u8, v: [*]const u8) !void {
 
 pub fn removeMonitoredAttribute(self: *App, id: usize) !void {
     try self.monitored_attributes.remove(id);
+}
 
-    gui.clearMonitoredAttributes();
-    for (self.monitored_attributes.cost.attributes.items, 0..) |item, i| {
-        const k_s = self.string_table.get(item.k);
-        const v_s = self.string_table.get(item.v);
-        gui.pushMonitoredAttribute(i, k_s.ptr, k_s.len, v_s.ptr, v_s.len);
+pub fn setMonitoredCostMultiplier(self: *App, id: usize, multiplier: f32) !void {
+    self.monitored_attributes.cost.update(id, multiplier);
+}
+
+fn wayParentScore(way: Way, point_lookup: *const PointLookup, a: Point, b: Point) f32 {
+    var min_score = std.math.inf(f32);
+
+    const ab = a.sub(b).normalized();
+
+    for (0..way.node_ids.len - 1) |i| {
+        const way_a = way.node_ids[i];
+        const way_b = way.node_ids[i + 1];
+        const way_point_a = point_lookup.get(way_a);
+        const way_point_b = point_lookup.get(way_b);
+
+        const way_ab = way_point_a.sub(way_point_b).normalized();
+        const dot = ab.dot(way_ab);
+        var parallel_score: f32 = undefined;
+        if (dot == 0) {
+            parallel_score = std.math.inf(f32);
+        } else {
+            // [0, 1]
+            // [inf, 0]
+            parallel_score = (@abs(1 / dot) - 1) * 5;
+        }
+
+        // Maybe we should sum min distances to way
+        var dist_score = lin.closestPointOnLine(a, way_point_a, way_point_b).sub(a).length();
+        dist_score += lin.closestPointOnLine(b, way_point_a, way_point_b).sub(b).length();
+
+        min_score = @min(dist_score + parallel_score, min_score);
     }
+
+    return min_score;
+}
+
+// FIXME: I odn't like the idea of hardcoding k/v pairs in app, but whatever
+// FIXME: WTF is going on here
+// FIXME: Awful API
+fn findSidewalkStreets(alloc: Allocator, point_lookup: *const PointLookup, way_buckets: *const WayBuckets, adjacency_map: *const NodeAdjacencyMap, point_pair_to_way: *const PointPairToWayMap, point_pair_to_parent: *PointPairToWayMap, string_table: *const StringTable, ways: *const WayLookup, metadata: *const Metadata, ebo: i32) !usize {
+    var index_buffer = std.ArrayList(u32).init(alloc);
+    defer index_buffer.deinit();
+
+    const sidewalk_k = string_table.findByStringContent("highway");
+    const sidewalk_v = string_table.findByStringContent("footway");
+
+    for (0..point_lookup.numPoints()) |node_id_usize| {
+        const node_id = NodeId{ .value = @intCast(node_id_usize) };
+        const point = point_lookup.get(node_id);
+        const bucket = way_buckets.get(point.y, point.x);
+        for (adjacency_map.getNeighbors(node_id)) |neighbor_id| {
+            const way_id = point_pair_to_way.get(node_id, neighbor_id) orelse @panic("no way for point pair");
+            const way_tags = metadata.way_tags[way_id.value];
+            if (!map_data.wayTagsContains(way_tags, sidewalk_k, sidewalk_v)) {
+                continue;
+            }
+            try index_buffer.appendSlice(&.{ node_id.value, neighbor_id.value, 0xffffffff });
+            const neighbor_point = point_lookup.get(neighbor_id);
+
+            var min_way_id: WayId = undefined;
+            var min_way_score = std.math.inf(f32);
+            for (bucket) |other_way_id| {
+                const other_way_tags = metadata.way_tags[other_way_id.value];
+                if (map_data.wayTagsContains(other_way_tags, sidewalk_k, sidewalk_v)) {
+                    continue;
+                }
+
+                const score = wayParentScore(ways.get(other_way_id), point_lookup, point, neighbor_point);
+                if (score < min_way_score) {
+                    min_way_score = score;
+                    min_way_id = other_way_id;
+                }
+            }
+
+            if (min_way_score != std.math.inf(f32)) {
+                try point_pair_to_parent.put(node_id, neighbor_id, min_way_id);
+            }
+        }
+    }
+
+    gui.glBindBuffer(Gl.ELEMENT_ARRAY_BUFFER, ebo);
+    gui.glBufferData(
+        Gl.ELEMENT_ARRAY_BUFFER,
+        @ptrCast(index_buffer.items.ptr),
+        index_buffer.items.len * 4,
+        Gl.STATIC_DRAW,
+    );
+
+    return index_buffer.items.len;
 }
 
 fn parseIndexBuffer(
@@ -333,33 +447,47 @@ fn parseIndexBuffer(
     width: f32,
     height: f32,
     index_buffer: []const u32,
-) !struct { WayLookup, WayBuckets, NodeAdjacencyMap } {
-    var ways = WayLookup.Builder.init(alloc, index_buffer);
+) !struct { WayLookup, WayBuckets, NodeAdjacencyMap, PointPairToWayMap } {
+    var ways = std.ArrayList(Way).init(alloc);
     defer ways.deinit();
 
     var way_buckets = try WayBuckets.init(alloc, width, height);
     var it = map_data.IndexBufferIt.init(index_buffer);
     var way_id: WayId = .{ .value = 0 };
 
-    var node_neighbors = try NodeAdjacencyMap.Builder.init(alloc, point_lookup.numPoints());
-    defer node_neighbors.deinit();
+    var arena = std.heap.ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const tmp_alloc = arena.allocator();
+    var node_neighbors = try tmp_alloc.alloc(std.AutoArrayHashMapUnmanaged(NodeId, void), point_lookup.numPoints());
+    @memset(node_neighbors, std.AutoArrayHashMapUnmanaged(NodeId, void){});
+
+    var point_pair_to_way = map_data.NodePairMap(WayId).init(alloc);
+    errdefer point_pair_to_way.deinit();
 
     while (it.next()) |idx_buf_range| {
         defer way_id.value += 1;
-        const way = map_data.Way.fromIndexRange(idx_buf_range, index_buffer);
+        const way = Way.fromIndexRange(idx_buf_range, index_buffer);
+        try ways.append(way);
+        for (way.node_ids, 0..) |node_id, i| {
+            if (i > 0) {
+                try node_neighbors[node_id.value].put(tmp_alloc, way.node_ids[i - 1], {});
+            }
 
-        try ways.feed(way);
-        try node_neighbors.feed(way);
+            if (i < way.node_ids.len - 1) {
+                const neighbor = way.node_ids[i + 1];
+                try node_neighbors[node_id.value].put(tmp_alloc, neighbor, {});
 
-        for (way.node_ids) |node_id| {
+                try point_pair_to_way.put(node_id, neighbor, way_id);
+            }
+
             const gps_pos = point_lookup.get(node_id);
             try way_buckets.push(way_id, gps_pos.y, gps_pos.x);
         }
     }
 
-    const node_adjacency_map = try node_neighbors.build();
-    const way_lookup = try ways.build();
-    return .{ way_lookup, way_buckets, node_adjacency_map };
+    const node_adjacency_map = try NodeAdjacencyMap.init(alloc, node_neighbors);
+    const way_lookup = WayLookup{ .ways = try ways.toOwnedSlice() };
+    return .{ way_lookup, way_buckets, node_adjacency_map, point_pair_to_way };
 }
 
 const ClosestWayCalculator = struct {
@@ -378,6 +506,7 @@ const ClosestWayCalculator = struct {
     min_dist_loc: MapPos,
     min_way: WayId,
     min_way_segment: usize,
+    neighbor_segment: usize,
 
     const DebugInfo = struct {
         dist: f32,
@@ -395,6 +524,7 @@ const ClosestWayCalculator = struct {
             .min_dist_loc = undefined,
             .min_way = undefined,
             .min_way_segment = undefined,
+            .neighbor_segment = undefined,
             .pos = p,
         };
     }
@@ -438,8 +568,10 @@ const ClosestWayCalculator = struct {
                 const ap_len = self.pos.sub(a).length();
                 if (ap_len / ab_len > 0.5) {
                     self.min_way_segment = self.segment_idx + 1;
+                    self.neighbor_segment = self.segment_idx;
                 } else {
                     self.min_way_segment = self.segment_idx;
+                    self.neighbor_segment = self.segment_idx + 1;
                 }
             }
 
@@ -482,7 +614,7 @@ const WayBuckets = struct {
         self.alloc.free(self.buckets);
     }
 
-    fn latLongToBucket(self: *WayBuckets, lat: f32, lon: f32) BucketId {
+    fn latLongToBucket(self: *const WayBuckets, lat: f32, lon: f32) BucketId {
         const row_f = lat / self.height * y_buckets;
         const col_f = lon / self.width * x_buckets;
         var row: usize = @intFromFloat(row_f);
@@ -503,7 +635,7 @@ const WayBuckets = struct {
         try self.buckets[idx.value].put(self.alloc, way_id, {});
     }
 
-    fn get(self: *WayBuckets, lat: f32, long: f32) []WayId {
+    fn get(self: *const WayBuckets, lat: f32, long: f32) []WayId {
         const bucket = self.latLongToBucket(lat, long);
         return self.buckets[bucket.value].keys();
     }
