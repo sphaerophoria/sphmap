@@ -335,6 +335,12 @@ pub const CoordinateSpaceConverter = struct {
 
         const width_deg = metadata.max_lon - metadata.min_lon;
         const height_deg = metadata.max_lat - metadata.min_lat;
+        std.log.debug("max lon: {d}, min lon: {d}, max lat: {d}, min lat: {d}", .{
+            metadata.max_lon,
+            metadata.min_lon,
+            metadata.max_lat,
+            metadata.min_lat,
+        });
 
         return .{
             .metadata = metadata,

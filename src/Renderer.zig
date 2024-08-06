@@ -23,11 +23,12 @@ r: FloatUniform,
 g: FloatUniform,
 b: FloatUniform,
 point_size: FloatUniform,
-num_line_segments: usize,
+num_street_segments: u32,
+num_bus_segments: u32,
 
 const Renderer = @This();
 
-pub fn init(point_data: []const f32, index_data: []const u32) Renderer {
+pub fn init(point_data: []const f32, index_data: []const u32, bus_street_split_idx: u32) Renderer {
     // Now create an array of positions for the square.
     const program = gui.compileLinkProgram(vs_source, vs_source.len, fs_source, fs_source.len);
 
@@ -65,7 +66,8 @@ pub fn init(point_data: []const f32, index_data: []const u32) Renderer {
         .r = r,
         .g = g,
         .b = b,
-        .num_line_segments = index_data.len,
+        .num_street_segments = bus_street_split_idx,
+        .num_bus_segments = @as(u32, @intCast(index_data.len)) - bus_street_split_idx,
     };
 }
 
@@ -127,7 +129,13 @@ const BoundRenderer = struct {
         self.inner.r.set(1.0);
         self.inner.g.set(1.0);
         self.inner.b.set(1.0);
-        gui.glDrawElements(Gl.LINE_STRIP, @intCast(self.inner.num_line_segments), Gl.UNSIGNED_INT, 0);
+        gui.glDrawElements(Gl.LINE_STRIP, @intCast(self.inner.num_street_segments), Gl.UNSIGNED_INT, 0);
+
+        // FIXME: dedup color values
+        self.inner.r.set(0.3);
+        self.inner.g.set(0.3);
+        self.inner.b.set(1.0);
+        gui.glDrawElements(Gl.LINE_STRIP, @intCast(self.inner.num_bus_segments), Gl.UNSIGNED_INT, @intCast(self.inner.num_street_segments * 4));
 
         self.inner.point_size.set(10.0);
         self.renderCoords(&.{ view_state.center.x, view_state.center.y }, Gl.POINTS);

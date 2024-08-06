@@ -64,6 +64,8 @@ pub fn init(alloc: Allocator, aspect_val: f32, map_data_buf: []u8, metadata: *co
     var string_table = try StringTable.init(alloc, split_data.string_table_data);
     errdefer string_table.deinit(alloc);
 
+    std.log.debug("width of map: {d}", .{meter_metdata.width});
+    std.log.debug("height of map: {d}", .{meter_metdata.height});
     const view_state = ViewState{
         .center = .{
             .x = meter_metdata.width / 2.0,
@@ -85,7 +87,10 @@ pub fn init(alloc: Allocator, aspect_val: f32, map_data_buf: []u8, metadata: *co
     var adjacency_map = index_buffer_objs[2];
     errdefer adjacency_map.deinit(alloc);
 
-    var renderer = Renderer.init(split_data.point_data, split_data.index_data);
+    const first_bus_way = way_lookup.get(.{ .value =  metadata.bus_way_start_idx });
+
+    const bus_index_buf_index = first_bus_way.indexRange(split_data.index_data).start;
+    var renderer = Renderer.init(split_data.point_data, split_data.index_data, @intCast(bus_index_buf_index));
     renderer.bind().render(view_state);
 
     const texture_renderer = TextureRenderer.init();
@@ -291,10 +296,12 @@ pub fn render(self: *App) void {
         bound_renderer.renderIndexBuffer(monitored.index_buffer, monitored.index_buffer_len, Gl.LINE_STRIP);
     }
 
+    const bus_point_size = 10000.0;
+    bound_renderer.inner.point_size.set(bus_point_size * self.view_state.zoom);
     const len = self.points.numPoints() - self.metadata.bus_node_start_idx;
-    bound_renderer.inner.r.set(1.0);
-    bound_renderer.inner.g.set(0.0);
-    bound_renderer.inner.b.set(0.0);
+    bound_renderer.inner.r.set(0.3);
+    bound_renderer.inner.g.set(0.3);
+    bound_renderer.inner.b.set(1.0);
     gui.glBindVertexArray(bound_renderer.inner.vao);
     gui.glDrawArrays(Gl.POINTS, @intCast(self.metadata.bus_node_start_idx), @intCast(len));
 }

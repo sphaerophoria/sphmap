@@ -50,37 +50,62 @@ const WayCache = struct {
 
 const MapDataWriter = struct {
     writer: std.io.AnyWriter,
-    node_id_idx_map: NodeIdIdxMap,
+    osm_nodes: NodeIdIdxMap,
+    gtfs_nodes: NodeIdIdxMap,
     num_pushed_nodes: usize = 0,
+    num_pushed_ways: usize = 0,
     min_lat: f32 = std.math.floatMax(f32),
     max_lat: f32 = -std.math.floatMax(f32),
     min_lon: f32 = std.math.floatMax(f32),
     max_lon: f32 = -std.math.floatMax(f32),
 
     fn deinit(self: *MapDataWriter) void {
-        self.node_id_idx_map.deinit();
+        self.osm_nodes.deinit();
+        self.gtfs_nodes.deinit();
     }
 
-    fn pushNode(self: *MapDataWriter, node_id: i64, lon: f32, lat: f32) !void {
+    fn pushOsmNode(self: *MapDataWriter, node_id: i64, lon: f32, lat: f32) !void {
+        const idx = try self.pushNodeImpl(lon, lat);
+        try self.osm_nodes.put(node_id, idx);
+    }
+
+    fn pushGtfsNode(self: *MapDataWriter, node_id: i64, lon: f32, lat: f32) !void {
+        const idx = try self.pushNodeImpl(lon, lat);
+        try self.gtfs_nodes.put(node_id, idx);
+    }
+
+    fn pushNodeImpl(self: *MapDataWriter, lon: f32, lat: f32) !usize {
         self.max_lon = @max(lon, self.max_lon);
         self.min_lon = @min(lon, self.min_lon);
         self.max_lat = @max(lat, self.max_lat);
         self.min_lat = @min(lat, self.min_lat);
 
-        self.node_id_idx_map.put(node_id, self.node_id_idx_map.count()) catch return;
-        self.num_pushed_nodes += 1;
-
         comptime std.debug.assert(builtin.cpu.arch.endian() == .little);
         try self.writer.writeAll(std.mem.asBytes(&lon));
         try self.writer.writeAll(std.mem.asBytes(&lat));
+
+        defer self.num_pushed_nodes += 1;
+        return self.num_pushed_nodes;
     }
 
-    fn pushWayNodes(self: *MapDataWriter, nodes: []const i64) !void {
+    fn pushOsmWay(self: *MapDataWriter, nodes: []const i64) !void {
         try self.writer.writeInt(u32, 0xffffffff, .little);
         for (nodes) |node_id| {
-            const node_idx = self.node_id_idx_map.get(node_id) orelse return error.NoNode;
+            const node_idx = self.osm_nodes.get(node_id) orelse return error.NoNode;
             try self.writer.writeInt(u32, @intCast(node_idx), .little);
         }
+
+        self.num_pushed_ways += 1;
+    }
+
+    fn pushGtfsWay(self: *MapDataWriter, nodes: []const i64) !void {
+        try self.writer.writeInt(u32, 0xffffffff, .little);
+        for (nodes) |node_id| {
+            const node_idx = self.gtfs_nodes.get(node_id) orelse return error.NoNode;
+            try self.writer.writeInt(u32, @intCast(node_idx), .little);
+        }
+
+        self.num_pushed_ways += 1;
     }
 
     fn pushStringTableString(self: *MapDataWriter, s: []const u8) !void {
@@ -402,7 +427,7 @@ pub fn main() !void {
     defer userdata.deinit();
 
     var bus_db = try BusDb.init("test.db");
-    const stops = try bus_db.getAllStops(alloc);
+    const routes = try bus_db.getAllStops(alloc);
 
     try runParser(alloc, args.osm_data, .{
         .ctx = &userdata,
@@ -411,36 +436,52 @@ pub fn main() !void {
     });
 
     var data_writer = MapDataWriter{
-        .node_id_idx_map = NodeIdIdxMap.init(alloc),
+        .osm_nodes = NodeIdIdxMap.init(alloc),
+        .gtfs_nodes = NodeIdIdxMap.init(alloc),
         .writer = counting_writer.writer().any(),
     };
     defer data_writer.deinit();
 
-    var seen_node_ids = std.AutoHashMap(i64, void).init(alloc);
-    defer seen_node_ids.deinit();
+    var seen_osm_nodes = std.AutoHashMap(i64, void).init(alloc);
+    defer seen_osm_nodes.deinit();
 
     for (userdata.way_nodes.items) |way_nodes| {
         for (way_nodes) |node_id| {
-            const seen = try seen_node_ids.getOrPut(node_id);
+            const seen = try seen_osm_nodes.getOrPut(node_id);
             if (!seen.found_existing) {
                 const node: NodeData = userdata.node_storage.get(node_id) orelse return error.NoNode;
-                try data_writer.pushNode(node_id, node.lon, node.lat);
+                try data_writer.pushOsmNode(node_id, node.lon, node.lat);
             }
         }
     }
 
     const bus_node_start: u32 = @intCast(data_writer.num_pushed_nodes);
 
-    for (stops) |route_stops| {
-        for (route_stops) |stop| {
-            try data_writer.pushNode(-1, stop.lon, stop.lat);
+    var seen_gtfs_nodes = std.AutoHashMap(i64, void).init(alloc);
+    defer seen_gtfs_nodes.deinit();
+
+
+    for (routes) |route| {
+        for (0..route.path.len) |i| {
+            const stop_id = route.stop_ids[i];
+            const seen = try seen_gtfs_nodes.getOrPut(stop_id);
+            if (!seen.found_existing) {
+                const stop = route.path[i];
+                try data_writer.pushGtfsNode(stop_id, stop.lon, stop.lat);
+            }
         }
     }
 
     const end_nodes = counting_writer.bytes_written;
 
     for (userdata.way_nodes.items) |way_nodes| {
-        try data_writer.pushWayNodes(way_nodes);
+        try data_writer.pushOsmWay(way_nodes);
+    }
+
+    const bus_way_start: u32 = @intCast(data_writer.num_pushed_ways);
+
+    for (routes) |route| {
+        try data_writer.pushGtfsWay(route.stop_ids);
     }
 
     const end_ways = counting_writer.bytes_written;
@@ -458,6 +499,7 @@ pub fn main() !void {
         .end_nodes = end_nodes,
         .end_ways = end_ways,
         .bus_node_start_idx = bus_node_start,
+        .bus_way_start_idx = bus_way_start,
         .way_tags = try userdata.way_tags.toOwnedSlice(),
     };
     try std.json.stringify(metadata, .{}, metadata_out_f.writer());

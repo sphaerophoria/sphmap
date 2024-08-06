@@ -48,14 +48,19 @@ pub fn getOneTripPerRoute(self: *Db) ![]i64 {
     return trip_id;
 }
 
-pub fn getAllStops(self: *Db, alloc: Allocator) ![][]Point {
+const RouteInfo = struct {
+    route_id: i64,
+    path: []const Point,
+    stop_ids: []const i64,
+};
+
+pub fn getAllStops(self: *Db, alloc: Allocator) ![]RouteInfo {
     const statement = try makeStatement(self.db, "SELECT route_id FROM routes", "get routes points");
     defer finalizeStatement(statement);
 
-    var ret = std.ArrayList([]Point).init(alloc);
+    var ret = std.ArrayList(RouteInfo).init(alloc);
     defer ret.deinit();
-    for (0..100) |i| {
-        std.debug.print("{d}\n", .{i});
+    while (true) {
         const sqlite_ret = c.sqlite3_step(statement);
         if (sqlite_ret == c.SQLITE_DONE) {
             break;
@@ -66,22 +71,41 @@ pub fn getAllStops(self: *Db, alloc: Allocator) ![][]Point {
         }
 
         const row = c.sqlite3_column_int64(statement, 0);
-        try ret.append(try self.getStops(alloc, row));
+        const seq = try self.getStops(alloc, row);
+        try ret.append(.{
+            .route_id = row,
+            .path = seq.points,
+            .stop_ids = seq.ids,
+        });
     }
 
     return ret.toOwnedSlice();
 }
 
-// [route_idx][stop_idx]Point
-pub fn getStops(self: *Db, alloc: Allocator, route_id: i64) ![]Point {
+const StopSequence = struct {
+    ids: []i64,
+    points: []Point,
+};
 
-    const statement = try makeStatement(self.db, "SELECT stops.stop_lon, stops.stop_lat, stop_times.stop_sequence FROM stop_times LEFT JOIN stops ON stop_times.stop_id == stops.stop_id WHERE trip_id = (SELECT trip_id from trips where route_id = ?1 LIMIT 1) ORDER BY cast(stop_times.stop_sequence as integer);", "get stop points");
+pub fn getStops(self: *Db, alloc: Allocator, route_id: i64) !StopSequence {
+    const statement = try makeStatement(self.db,
+        \\ SELECT stops.stop_lon, stops.stop_lat, stop_times.stop_id
+        \\ FROM stop_times
+        \\ LEFT JOIN stops ON stop_times.stop_id == stops.stop_id
+        \\ WHERE trip_id = (
+        \\    SELECT trip_id from trips where route_id = ?1 LIMIT 1
+        \\ )
+        \\ ORDER BY cast(stop_times.stop_sequence as integer);
+        , "get stop points");
     defer finalizeStatement(statement);
 
     try checkSqliteRet("bind route id", c.sqlite3_bind_int64(statement, 1, route_id));
 
-    var ret = std.ArrayList(Point).init(alloc);
-    defer ret.deinit();
+    var ret_points = std.ArrayList(Point).init(alloc);
+    defer ret_points.deinit();
+
+    var ret_ids = std.ArrayList(i64).init(alloc);
+    defer ret_ids.deinit();
     while (true) {
         const sqlite_ret = c.sqlite3_step(statement);
         if (sqlite_ret == c.SQLITE_DONE) {
@@ -96,13 +120,21 @@ pub fn getStops(self: *Db, alloc: Allocator, route_id: i64) ![]Point {
 
         const lat_s = extractColumnTextTemporary(statement, 1) orelse return error.NoLat;
         const lat = try std.fmt.parseFloat(f32, lat_s);
-        try ret.append(.{
+
+        const stop_id = c.sqlite3_column_int64(statement, 2);
+
+        try ret_points.append(.{
             .lon = lon,
             .lat = lat,
         });
+
+        try ret_ids.append(stop_id);
     }
 
-    return try ret.toOwnedSlice();
+    return .{
+        .points = try ret_points.toOwnedSlice(),
+        .ids = try ret_ids.toOwnedSlice(),
+    };
 }
 
 fn getRoutePoints(self: *Db, alloc: Allocator) ![]Point {
