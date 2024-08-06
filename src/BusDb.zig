@@ -48,14 +48,21 @@ pub fn getOneTripPerRoute(self: *Db) ![]i64 {
     return trip_id;
 }
 
-const RouteInfo = struct {
+pub const RouteInfo = struct {
     route_id: i64,
+    short_name: []const u8,
+    long_name: []const u8,
     path: []const Point,
     stop_ids: []const i64,
+
+    pub fn deinit(self: *RouteInfo, alloc: Allocator) void {
+        alloc.free(self.short_name);
+        alloc.free(self.long_name);
+    }
 };
 
 pub fn getAllStops(self: *Db, alloc: Allocator) ![]RouteInfo {
-    const statement = try makeStatement(self.db, "SELECT route_id FROM routes", "get routes points");
+    const statement = try makeStatement(self.db, "SELECT route_id, route_short_name, route_long_name FROM routes", "get routes points");
     defer finalizeStatement(statement);
 
     var ret = std.ArrayList(RouteInfo).init(alloc);
@@ -71,9 +78,20 @@ pub fn getAllStops(self: *Db, alloc: Allocator) ![]RouteInfo {
         }
 
         const row = c.sqlite3_column_int64(statement, 0);
-        const seq = try self.getStops(alloc, row);
+
+        const short_name = try extractColumnText(alloc, statement, 1) orelse return error.NoRouteShortName;
+        errdefer alloc.free(short_name);
+
+        const long_name = try extractColumnText(alloc, statement, 2) orelse return error.NoRouteLongName;
+        errdefer alloc.free(long_name);
+
+        var seq = try self.getStops(alloc, row);
+        errdefer seq.deinit(alloc);
+
         try ret.append(.{
             .route_id = row,
+            .short_name = short_name,
+            .long_name = long_name,
             .path = seq.points,
             .stop_ids = seq.ids,
         });
@@ -85,6 +103,11 @@ pub fn getAllStops(self: *Db, alloc: Allocator) ![]RouteInfo {
 const StopSequence = struct {
     ids: []i64,
     points: []Point,
+
+    fn deinit(self: *StopSequence, alloc: Allocator) void {
+        alloc.free(self.ids);
+        alloc.free(self.points);
+    }
 };
 
 pub fn getStops(self: *Db, alloc: Allocator, route_id: i64) !StopSequence {
@@ -199,6 +222,11 @@ fn extractColumnTextTemporary(statement: *c.sqlite3_stmt, column_id: c_int) ?[]c
         return null;
     }
     return item_opt.?[0..@intCast(item_len)];
+}
+
+fn extractColumnText(alloc: Allocator, statement: *c.sqlite3_stmt, column_id: c_int) !?[]const u8 {
+    const s = extractColumnTextTemporary(statement, column_id) orelse return null;
+    return try alloc.dupe(u8, s);
 }
 
 fn extractColumnBlob(alloc: Allocator, statement: *c.sqlite3_stmt, column_id: c_int) !?[]const u8 {

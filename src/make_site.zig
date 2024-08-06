@@ -428,6 +428,7 @@ pub fn main() !void {
 
     var bus_db = try BusDb.init("test.db");
     const routes = try bus_db.getAllStops(alloc);
+    defer for (routes) |*route| route.deinit(alloc);
 
     try runParser(alloc, args.osm_data, .{
         .ctx = &userdata,
@@ -460,7 +461,6 @@ pub fn main() !void {
     var seen_gtfs_nodes = std.AutoHashMap(i64, void).init(alloc);
     defer seen_gtfs_nodes.deinit();
 
-
     for (routes) |route| {
         for (0..route.path.len) |i| {
             const stop_id = route.stop_ids[i];
@@ -480,8 +480,23 @@ pub fn main() !void {
 
     const bus_way_start: u32 = @intCast(data_writer.num_pushed_ways);
 
+
+    const short_name_key = try userdata.string_table.push("short_name");
+    const long_name_key = try userdata.string_table.push("long_name");
+
     for (routes) |route| {
+        const short_name_val = try userdata.string_table.push(route.short_name);
+        const long_name_val = try userdata.string_table.push(route.long_name);
+
         try data_writer.pushGtfsWay(route.stop_ids);
+
+        const keys = try alloc.dupe(usize, &.{short_name_key, long_name_key});
+        errdefer alloc.free(keys);
+
+        const vals = try alloc.dupe(usize, &.{short_name_val, long_name_val});
+        errdefer alloc.free(vals);
+
+        try userdata.way_tags.append(Metadata.Tags{ keys, vals });
     }
 
     const end_ways = counting_writer.bytes_written;
