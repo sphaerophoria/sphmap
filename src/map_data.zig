@@ -328,11 +328,10 @@ pub const CoordinateSpaceConverter = struct {
     lon_step: f32,
 
     pub fn init(metadata: *const Metadata) CoordinateSpaceConverter {
-        const center_lat = (metadata.min_lat + metadata.max_lat) / 2.0;
-        const center_lon = (metadata.min_lon + metadata.max_lon) / 2.0;
+        const center_lat = (metadata.min_lat + metadata.max_lat) / 2.0 * std.math.rad_per_deg;
 
         const lat_step = 111132.92 - 559.82 * @cos(2 * center_lat) + 1.175 * @cos(4 * center_lat) - 0.0023 * @cos(6 * center_lat);
-        const lon_step = 111412.84 * @cos(center_lon) - 93.5 * @cos(3 * center_lon) + 0.118 * @cos(5 * center_lon);
+        const lon_step = 111412.84 * @cos(center_lat) - 93.5 * @cos(3 * center_lat) + 0.118 * @cos(5 * center_lat);
 
         const width_deg = metadata.max_lon - metadata.min_lon;
         const height_deg = metadata.max_lat - metadata.min_lat;
@@ -347,7 +346,7 @@ pub const CoordinateSpaceConverter = struct {
     }
 
     pub fn latToM(self: *const CoordinateSpaceConverter, lat: f32) f32 {
-        return self.lat_step * (self.metadata.max_lat - lat);
+        return self.lat_step * (lat - self.metadata.min_lat);
     }
 
     pub fn lonToM(self: *const CoordinateSpaceConverter, lon: f32) f32 {

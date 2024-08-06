@@ -418,7 +418,7 @@ class CanvasInputHandler {
 
   normY(client_y) {
     const rect = this.canvas.getBoundingClientRect();
-    return (client_y - rect.top) / rect.height;
+    return (client_y - rect.top) / rect.width;
   }
 
   onMouseDown(ev) {
