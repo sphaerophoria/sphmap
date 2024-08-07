@@ -25,6 +25,7 @@ const StringTable = map_data.StringTable;
 const gui = @import("gui_bindings.zig");
 const ViewState = Renderer.ViewState;
 const WaysForTagPair = map_data.WaysForTagPair;
+const WayBuckets = map_data.MapBuckets(WayId);
 
 const App = @This();
 
@@ -82,7 +83,7 @@ pub fn init(alloc: Allocator, aspect_val: f32, map_data_buf: []u8, metadata: *co
     errdefer way_lookup.deinit(alloc);
 
     var way_buckets = index_buffer_objs[1];
-    errdefer way_buckets.deinit();
+    errdefer way_buckets.deinit(alloc);
 
     var adjacency_map = index_buffer_objs[2];
     errdefer adjacency_map.deinit(alloc);
@@ -90,7 +91,10 @@ pub fn init(alloc: Allocator, aspect_val: f32, map_data_buf: []u8, metadata: *co
     const first_bus_way = way_lookup.get(.{ .value =  metadata.bus_way_start_idx });
 
     const bus_index_buf_index = first_bus_way.indexRange(split_data.index_data).start;
-    var renderer = Renderer.init(split_data.point_data, split_data.index_data, @intCast(bus_index_buf_index));
+
+    const first_connection_way = way_lookup.get(.{ .value =  metadata.osm_to_bus_way_start_idx });
+    const connection_buf_index = first_connection_way.indexRange(split_data.index_data).start;
+    var renderer = Renderer.init(split_data.point_data, split_data.index_data, @intCast(bus_index_buf_index), @intCast(connection_buf_index));
     renderer.bind().render(view_state);
 
     const texture_renderer = TextureRenderer.init();
@@ -123,7 +127,7 @@ pub fn init(alloc: Allocator, aspect_val: f32, map_data_buf: []u8, metadata: *co
 pub fn deinit(self: *App) void {
     self.adjacency_map.deinit(self.alloc);
     self.ways.deinit(self.alloc);
-    self.way_buckets.deinit();
+    self.way_buckets.deinit(self.alloc);
     self.string_table.deinit(self.alloc);
     self.monitored_attributes.deinit();
     self.alloc.destroy(self);
@@ -296,7 +300,7 @@ pub fn render(self: *App) void {
         bound_renderer.renderIndexBuffer(monitored.index_buffer, monitored.index_buffer_len, Gl.LINE_STRIP);
     }
 
-    const bus_point_size = 10000.0;
+    const bus_point_size = 1000.0;
     bound_renderer.inner.point_size.set(bus_point_size * self.view_state.zoom);
     const len = self.points.numPoints() - self.metadata.bus_node_start_idx;
     bound_renderer.inner.r.set(0.3);
@@ -351,7 +355,7 @@ fn parseIndexBuffer(
     var ways = WayLookup.Builder.init(alloc, index_buffer);
     defer ways.deinit();
 
-    var way_buckets = try WayBuckets.init(alloc, width, height);
+    var way_buckets_builder = try WayBuckets.Builder.init(alloc, width, height);
     var it = map_data.IndexBufferIt.init(index_buffer);
     var way_id: WayId = .{ .value = 0 };
 
@@ -367,12 +371,13 @@ fn parseIndexBuffer(
 
         for (way.node_ids) |node_id| {
             const gps_pos = point_lookup.get(node_id);
-            try way_buckets.push(way_id, gps_pos.y, gps_pos.x);
+            try way_buckets_builder.push(way_id, gps_pos.y, gps_pos.x);
         }
     }
 
     const node_adjacency_map = try node_neighbors.build();
     const way_lookup = try ways.build();
+    const way_buckets = try way_buckets_builder.build();
     return .{ way_lookup, way_buckets, node_adjacency_map };
 }
 
@@ -462,66 +467,66 @@ const ClosestWayCalculator = struct {
     }
 };
 
-const WayBuckets = struct {
-    const x_buckets = 100;
-    const y_buckets = 100;
-    const BucketId = struct {
-        value: usize,
-    };
-
-    const WayIdSet = std.AutoArrayHashMapUnmanaged(WayId, void);
-    alloc: Allocator,
-    buckets: []WayIdSet,
-    width: f32,
-    height: f32,
-
-    fn init(alloc: Allocator, width: f32, height: f32) !WayBuckets {
-        const buckets = try alloc.alloc(WayIdSet, x_buckets * y_buckets);
-        for (buckets) |*bucket| {
-            bucket.* = .{};
-        }
-
-        return .{
-            .alloc = alloc,
-            .buckets = buckets,
-            .width = width,
-            .height = height,
-        };
-    }
-
-    fn deinit(self: *WayBuckets) void {
-        for (self.buckets) |*bucket| {
-            bucket.deinit(self.alloc);
-        }
-        self.alloc.free(self.buckets);
-    }
-
-    fn latLongToBucket(self: *WayBuckets, lat: f32, lon: f32) BucketId {
-        const row_f = lat / self.height * y_buckets;
-        const col_f = lon / self.width * x_buckets;
-        var row: usize = @intFromFloat(row_f);
-        var col: usize = @intFromFloat(col_f);
-
-        if (row >= x_buckets) {
-            row = x_buckets - 1;
-        }
-
-        if (col >= y_buckets) {
-            col = y_buckets - 1;
-        }
-        return .{ .value = row * x_buckets + col };
-    }
-
-    fn push(self: *WayBuckets, way_id: WayId, lat: f32, long: f32) !void {
-        const idx = self.latLongToBucket(lat, long);
-        try self.buckets[idx.value].put(self.alloc, way_id, {});
-    }
-
-    fn get(self: *WayBuckets, lat: f32, long: f32) []WayId {
-        const bucket = self.latLongToBucket(lat, long);
-        return self.buckets[bucket.value].keys();
-    }
-};
+//const WayBuckets = struct {
+//    const x_buckets = 100;
+//    const y_buckets = 100;
+//    const BucketId = struct {
+//        value: usize,
+//    };
+//
+//    const WayIdSet = std.AutoArrayHashMapUnmanaged(WayId, void);
+//    alloc: Allocator,
+//    buckets: []WayIdSet,
+//    width: f32,
+//    height: f32,
+//
+//    fn init(alloc: Allocator, width: f32, height: f32) !WayBuckets {
+//        const buckets = try alloc.alloc(WayIdSet, x_buckets * y_buckets);
+//        for (buckets) |*bucket| {
+//            bucket.* = .{};
+//        }
+//
+//        return .{
+//            .alloc = alloc,
+//            .buckets = buckets,
+//            .width = width,
+//            .height = height,
+//        };
+//    }
+//
+//    fn deinit(self: *WayBuckets) void {
+//        for (self.buckets) |*bucket| {
+//            bucket.deinit(self.alloc);
+//        }
+//        self.alloc.free(self.buckets);
+//    }
+//
+//    fn latLongToBucket(self: *WayBuckets, lat: f32, lon: f32) BucketId {
+//        const row_f = lat / self.height * y_buckets;
+//        const col_f = lon / self.width * x_buckets;
+//        var row: usize = @intFromFloat(row_f);
+//        var col: usize = @intFromFloat(col_f);
+//
+//        if (row >= x_buckets) {
+//            row = x_buckets - 1;
+//        }
+//
+//        if (col >= y_buckets) {
+//            col = y_buckets - 1;
+//        }
+//        return .{ .value = row * x_buckets + col };
+//    }
+//
+//    fn push(self: *WayBuckets, way_id: WayId, lat: f32, long: f32) !void {
+//        const idx = self.latLongToBucket(lat, long);
+//        try self.buckets[idx.value].put(self.alloc, way_id, {});
+//    }
+//
+//    fn get(self: *WayBuckets, lat: f32, long: f32) []WayId {
+//        const bucket = self.latLongToBucket(lat, long);
+//        return self.buckets[bucket.value].keys();
+//    }
+//};
 
 const TileLocation = struct {
     center: Point,

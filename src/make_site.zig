@@ -5,6 +5,7 @@ const XmlParser = @import("XmlParser.zig");
 const image_tile_data_mod = @import("image_tile_data.zig");
 const Allocator = std.mem.Allocator;
 const BusDb =  @import("BusDb.zig");
+const map_data = @import("map_data.zig");
 
 const NodeIdIdxMap = std.AutoHashMap(i64, usize);
 
@@ -107,6 +108,16 @@ const MapDataWriter = struct {
 
         self.num_pushed_ways += 1;
     }
+
+    fn pushWayByIndex(self: *MapDataWriter, nodes: []const usize) !void {
+        try self.writer.writeInt(u32, 0xffffffff, .little);
+        for (nodes) |node_idx| {
+            try self.writer.writeInt(u32, @intCast(node_idx), .little);
+        }
+
+        self.num_pushed_ways += 1;
+    }
+
 
     fn pushStringTableString(self: *MapDataWriter, s: []const u8) !void {
         comptime std.debug.assert(builtin.cpu.arch.endian() == .little);
@@ -458,7 +469,7 @@ pub fn main() !void {
 
     const bus_node_start: u32 = @intCast(data_writer.num_pushed_nodes);
 
-    var seen_gtfs_nodes = std.AutoHashMap(i64, void).init(alloc);
+    var seen_gtfs_nodes = std.AutoHashMap(i64, NodeData).init(alloc);
     defer seen_gtfs_nodes.deinit();
 
     for (routes) |route| {
@@ -467,6 +478,8 @@ pub fn main() !void {
             const seen = try seen_gtfs_nodes.getOrPut(stop_id);
             if (!seen.found_existing) {
                 const stop = route.path[i];
+                seen.value_ptr.lat = stop.lat;
+                seen.value_ptr.lon = stop.lon;
                 try data_writer.pushGtfsNode(stop_id, stop.lon, stop.lat);
             }
         }
@@ -479,7 +492,6 @@ pub fn main() !void {
     }
 
     const bus_way_start: u32 = @intCast(data_writer.num_pushed_ways);
-
 
     const short_name_key = try userdata.string_table.push("short_name");
     const long_name_key = try userdata.string_table.push("long_name");
@@ -499,6 +511,50 @@ pub fn main() !void {
         try userdata.way_tags.append(Metadata.Tags{ keys, vals });
     }
 
+    const osm_to_bus_way_start: u32 = @intCast(data_writer.num_pushed_ways);
+    // FIXME: This is really order dependent and not well defined at all gross ew, please fix me, please.
+    // FIXME: Holy crap we need functions
+    const width = data_writer.max_lon - data_writer.min_lon;
+    const height = data_writer.max_lat - data_writer.min_lat;
+
+    var osm_node_buckets_builder = try map_data.MapBuckets(i64).Builder.init(alloc, width, height);
+    errdefer osm_node_buckets_builder.deinit();
+
+    var osm_node_it = data_writer.osm_nodes.keyIterator();
+    while (osm_node_it.next()) |osm_id| {
+        const data = userdata.node_storage.get(osm_id.*).?;
+        // FIXME: What the fuck we shouldn't have to subtract minxy
+        try osm_node_buckets_builder.push(osm_id.*, data.lat - data_writer.min_lat, data.lon - data_writer.min_lon);
+    }
+
+    var osm_node_buckets = try osm_node_buckets_builder.build();
+    defer osm_node_buckets.deinit(alloc);
+
+    //// FIXME: latitude longitude space is not correct to find closest point
+    var bus_stop_it = seen_gtfs_nodes.iterator();
+    while (bus_stop_it.next()) |item| {
+        var closest_node: i64 = undefined;
+        var closest_dist = std.math.inf(f32);
+        // FIXME: Do not sub min lat/lon
+        const close_node_ids = osm_node_buckets.get(item.value_ptr.lat - data_writer.min_lat, item.value_ptr.lon - data_writer.min_lon);
+        for (close_node_ids) |osm_id| {
+            const osm_point = userdata.node_storage.get(osm_id).?;
+            const lat_dist = osm_point.lat - item.value_ptr.lat;
+            const lon_dist = osm_point.lon - item.value_ptr.lon;
+
+            const total_dist_2 = lat_dist * lat_dist + lon_dist * lon_dist;
+            if (total_dist_2 < closest_dist) {
+                closest_node = osm_id;
+                closest_dist = total_dist_2;
+            }
+        }
+        if (closest_dist != std.math.inf(f32)) {
+            const bus_idx = data_writer.gtfs_nodes.get(item.key_ptr.*).?;
+            const osm_idx = data_writer.osm_nodes.get(closest_node).?;
+            try data_writer.pushWayByIndex(&.{osm_idx, bus_idx});
+        }
+    }
+
     const end_ways = counting_writer.bytes_written;
 
     for (userdata.string_table.inner.keys()) |key| {
@@ -515,6 +571,7 @@ pub fn main() !void {
         .end_ways = end_ways,
         .bus_node_start_idx = bus_node_start,
         .bus_way_start_idx = bus_way_start,
+        .osm_to_bus_way_start_idx = osm_to_bus_way_start,
         .way_tags = try userdata.way_tags.toOwnedSlice(),
     };
     try std.json.stringify(metadata, .{}, metadata_out_f.writer());

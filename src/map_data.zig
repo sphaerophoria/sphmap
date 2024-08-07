@@ -416,3 +416,106 @@ pub const WaysForTagPair = struct {
         }
     }
 };
+
+pub fn MapBuckets(comptime T: type) type {
+    return struct {
+        const x_buckets = 100;
+        const y_buckets = 100;
+        const BucketId = struct {
+            value: usize,
+        };
+
+        const Self = @This();
+
+        pub const Builder = struct {
+            const ItemSet = std.AutoArrayHashMapUnmanaged(T, void);
+
+            sets: []ItemSet,
+            alloc: Allocator,
+            inner: Self,
+
+            pub fn init(alloc: Allocator, width: f32, height: f32) !Builder {
+                const sets = try alloc.alloc(ItemSet, x_buckets * y_buckets);
+                for (sets) |*bucket| {
+                    bucket.* = .{};
+                }
+
+                return .{
+                    .sets = sets,
+                    .alloc = alloc,
+                    .inner = .{
+                        .buckets = &.{},
+                        .width = width,
+                        .height = height,
+                    },
+                };
+            }
+
+            // Should only be called if build is not called or does not succeed
+            pub fn deinit(self: *Builder) void {
+                for (self.sets) |*set| {
+                    set.deinit(self.alloc);
+                }
+                self.alloc.free(self.sets);
+            }
+
+            pub fn build(self: *Builder) !Self {
+                const inner_buckets = try self.alloc.alloc([]T, x_buckets * y_buckets);
+                var i: usize = 0;
+                errdefer {
+                    for (0..i) |j| {
+                        self.alloc.free(inner_buckets[j]);
+                    }
+                    self.alloc.free(inner_buckets);
+                }
+
+                while (i < self.sets.len) {
+                    defer i += 1;
+                    inner_buckets[i] = try self.alloc.dupe(T, self.sets[i].keys());
+                }
+
+                defer self.deinit();
+                self.inner.buckets = inner_buckets;
+                return self.inner;
+            }
+
+            pub fn push(self: *Builder, item: T, lat: f32, long: f32) !void {
+                const idx = latLongToBucket(lat, long, self.inner.height, self.inner.width);
+                try self.sets[idx.value].put(self.alloc, item, {});
+            }
+
+        };
+
+        buckets: [][]T,
+        width: f32,
+        height: f32,
+
+        fn latLongToBucket(lat: f32, lon: f32, height: f32, width: f32) BucketId {
+            const row_f = lat / height * y_buckets;
+            const col_f = lon / width * x_buckets;
+            var row: usize = @intFromFloat(row_f);
+            var col: usize = @intFromFloat(col_f);
+
+            if (row >= x_buckets) {
+                row = x_buckets - 1;
+            }
+
+            if (col >= y_buckets) {
+                col = y_buckets - 1;
+            }
+            return .{ .value = row * x_buckets + col };
+        }
+
+        pub fn deinit(self: *Self, alloc: Allocator) void {
+            for (self.buckets) |bucket| {
+                alloc.free(bucket);
+            }
+            alloc.free(self.buckets);
+        }
+
+        pub fn get(self: *Self, lat: f32, long: f32) []T {
+            const bucket = latLongToBucket(lat, long, self.height, self.width);
+            return self.buckets[bucket.value];
+        }
+    };
+}
